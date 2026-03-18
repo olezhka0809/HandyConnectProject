@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
 
-export default function ProtectedRoute({ children, allowedRoles }) {
+export default function ProtectedRoute({ children, allowedRoles = [], requireOnboarding = true }) {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [authorized, setAuthorized] = useState(false)
@@ -16,18 +16,6 @@ export default function ProtectedRoute({ children, allowedRoles }) {
         return
       }
 
-      // Verifică dacă a completat onboarding-ul
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('onboarding_completed')
-        .eq('id', user.id)
-        .single()
-
-      if (!profile?.onboarding_completed) {
-        navigate('/onboarding')
-        return
-      }
-
       // Verifică rolul
       const { data: roles } = await supabase
         .from('user_roles')
@@ -35,11 +23,25 @@ export default function ProtectedRoute({ children, allowedRoles }) {
         .eq('user_id', user.id)
 
       const userRoles = roles?.map(r => r.roles.name) || []
-      const hasAccess = allowedRoles.some(role => userRoles.includes(role))
+      const hasAccess = allowedRoles.length === 0 || allowedRoles.some(role => userRoles.includes(role))
 
       if (!hasAccess) {
         navigate('/')
         return
+      }
+
+      // Verifică dacă a completat onboarding-ul
+      if (requireOnboarding) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('onboarding_completed')
+          .eq('id', user.id)
+          .single()
+
+        if (!profile?.onboarding_completed) {
+          navigate(userRoles.includes('handyman') ? '/handyman-onboarding' : '/onboarding')
+          return
+        }
       }
 
       setAuthorized(true)
@@ -47,7 +49,7 @@ export default function ProtectedRoute({ children, allowedRoles }) {
     }
 
     checkAccess()
-  }, [navigate, allowedRoles])
+  }, [navigate, allowedRoles, requireOnboarding])
 
   if (loading) {
     return (
