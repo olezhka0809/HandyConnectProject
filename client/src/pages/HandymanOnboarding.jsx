@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
+import CityAutocomplete from '../components/CityAutocomplete'
 import logo from '../assets/Logo_pin.png'
 import {
   ChevronLeft, ChevronRight, Upload, CheckCircle, Camera,
@@ -39,6 +40,7 @@ export default function HandymanOnboarding() {
     email: '',
     phone: '',
     city: '',
+    county: '',
     experience: '',
     services: [],
     bio: '',
@@ -101,6 +103,7 @@ export default function HandymanOnboarding() {
       last_name: form.lastName,
       phone: form.phone,
       city: form.city,
+      county: form.county,
     }).eq('id', user.id)
 
     await supabase.from('handyman_profiles').update({
@@ -214,33 +217,35 @@ export default function HandymanOnboarding() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-bold text-gray-800 mb-1">Nume *</label>
+                  <label className="block text-sm font-bold text-gray-800 mb-1">Prenume *</label>
                   <input type="text" value={form.firstName} onChange={(e) => update('firstName', e.target.value)}
                     placeholder="Prenumele tău" className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-800 mb-1">Nume *</label>
+                  <input type="text" value={form.lastName} onChange={(e) => update('lastName', e.target.value)}
+                    placeholder="Numele tău" className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-bold text-gray-800 mb-1">Email *</label>
                   <input type="email" value={form.email} disabled
                     className="w-full px-4 py-3 border border-gray-200 rounded-xl bg-gray-50 text-gray-500" />
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-bold text-gray-800 mb-1">Telefon *</label>
                   <input type="tel" value={form.phone} onChange={(e) => update('phone', e.target.value)}
                     placeholder="+40 7XX XXX XXX" className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
-                <div>
-                  <label className="block text-sm font-bold text-gray-800 mb-1">Parolă *</label>
-                  <input type="password" disabled value="••••••••"
-                    className="w-full px-4 py-3 border border-gray-200 rounded-xl bg-gray-50 text-gray-500" />
-                  <p className="text-xs text-gray-400 mt-1">Setată la înregistrare</p>
-                </div>
               </div>
               <div>
                 <label className="block text-sm font-bold text-gray-800 mb-1">Locație *</label>
-                <input type="text" value={form.city} onChange={(e) => update('city', e.target.value)}
-                  placeholder="Orașul sau codul poștal" className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <CityAutocomplete
+                  value={form.city ? `${form.city}${form.county ? ', ' + form.county : ''}` : ''}
+                  onChange={(city) => setForm(prev => ({ ...prev, city: city.name, county: city.county }))}
+                  placeholder="Exemplu: Timișoara"
+                />
               </div>
               <div>
                 <label className="block text-sm font-bold text-gray-800 mb-1">Ani de experiență</label>
@@ -472,7 +477,7 @@ export default function HandymanOnboarding() {
 
           {step === 1 && (
             <button onClick={saveStep1}
-              disabled={loading || !form.firstName || !form.phone || !form.city}
+              disabled={loading || !form.firstName || !form.lastName || !form.phone || !form.city}
               className="flex items-center gap-1 px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed ml-auto">
               {loading ? 'Se salvează...' : 'Continuă'} <ChevronRight className="w-4 h-4" />
             </button>
