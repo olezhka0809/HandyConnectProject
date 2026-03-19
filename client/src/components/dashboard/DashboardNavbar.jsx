@@ -15,6 +15,7 @@ export default function DashboardNavbar() {
   const location = useLocation()
   const [profile, setProfile] = useState(null)
   const [showNotifications, setShowNotifications] = useState(false)
+  const profilePath = location.pathname.startsWith('/handyman') ? '/handyman/personal-profile' : '/profile'
 
   const isActive = (path) => location.pathname === path
 
@@ -81,7 +82,7 @@ export default function DashboardNavbar() {
             </button>
 
             {/* Avatar */}
-            <Link to="/profile" className="ml-2">
+            <Link to={profilePath} className="ml-2">
               {profile?.avatar_url ? (
                 <img
                   src={profile.avatar_url}

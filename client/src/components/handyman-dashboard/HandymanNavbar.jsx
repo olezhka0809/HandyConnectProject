@@ -69,7 +69,18 @@ export default function HandymanNavbar() {
               <Bell className="w-5 h-5" />
               <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-white text-[10px] flex items-center justify-center font-bold">5</span>
             </button>
-            <Link to="/handyman/profile" className="ml-2">
+            <Link
+              to="/handyman/personal-profile"
+              className={`w-10 h-10 rounded-lg border flex items-center justify-center transition ${
+                isActive('/handyman/personal-profile')
+                  ? 'border-blue-200 bg-blue-50 text-blue-600'
+                  : 'border-gray-200 text-gray-500 hover:bg-gray-50 hover:text-blue-600'
+              }`}
+              aria-label="Setări"
+            >
+              <Settings className="w-5 h-5" />
+            </Link>
+            <Link to="/handyman/my-profile" className="ml-2">
               {profile?.avatar_url ? (
                 <img src={profile.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full object-cover border-2 border-gray-200 hover:border-blue-400 transition" />
               ) : (
