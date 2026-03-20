@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { supabase } from '../supabase'
 import DashboardNavbar from '../components/dashboard/DashboardNavbar'
+import useLocation from '../hooks/useLocation'
+import LocationBanner from '../components/LocationBanner'
+import ClientTaskDetailModal from '../components/dashboard/client-dashboard/ClientTaskDetailModal'
 import {
   Plus, LogOut, Calendar, CheckCircle, Clock, DollarSign,
   Star, MessageSquare, Heart, Briefcase, Search, Bell,
@@ -10,6 +13,7 @@ import {
 
 export default function ClientDashboard() {
   const navigate = useNavigate()
+  const [currentUserId, setCurrentUserId] = useState(null)
   const [profile, setProfile] = useState(null)
   const [stats, setStats] = useState(null)
   const [bookings, setBookings] = useState([])
@@ -18,6 +22,8 @@ export default function ClientDashboard() {
   const [recentActivity, setRecentActivity] = useState([])
   const [tab, setTab] = useState('overview')
   const [loading, setLoading] = useState(true)
+  const [detailTaskId, setDetailTaskId] = useState(null)
+  const { location, error: locationError } = useLocation(currentUserId)
 
   useEffect(() => {
     loadDashboardData()
@@ -27,7 +33,7 @@ export default function ClientDashboard() {
     setLoading(true)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) { navigate('/login'); return }
-
+    setCurrentUserId(user.id)
     // Profil
     const { data: profileData } = await supabase
       .from('profiles')
@@ -164,6 +170,11 @@ export default function ClientDashboard() {
     return `${Number(price).toLocaleString('ro-RO')} RON`
   }
 
+  const retryLocation = () => {
+    // Reîncarcă pagina pentru a cere din nou permisiunea
+    window.location.reload()
+  }
+
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
@@ -175,7 +186,11 @@ export default function ClientDashboard() {
   return (
     <div className="min-h-screen bg-gray-50">
       <DashboardNavbar />
-
+      <LocationBanner 
+        location={location} 
+        error={locationError} 
+        onRetry={retryLocation} 
+      />
       <div className="max-w-7xl mx-auto px-4 py-8">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
@@ -338,7 +353,7 @@ export default function ClientDashboard() {
                 {tasks.length > 0 ? (
                   <div className="divide-y divide-gray-50">
                     {tasks.slice(0, 4).map((task) => (
-                      <div key={task.id} className="p-4 hover:bg-gray-50 transition">
+                      <div key={task.id} className="p-4 hover:bg-gray-50 transition"  onClick={() => setDetailTaskId(task.id)}>
                         <div className="flex items-center justify-between mb-2">
                           <div>
                             <p className="font-medium text-gray-800">{task.title}</p>
@@ -660,6 +675,11 @@ export default function ClientDashboard() {
           </div>
         )}
       </div>
+      <ClientTaskDetailModal
+        taskId={detailTaskId}
+        onClose={() => setDetailTaskId(null)}
+        onUpdated={loadDashboardData}
+      />
     </div>
   )
 }
