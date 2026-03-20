@@ -1,55 +1,66 @@
-import { Camera } from 'lucide-react'
+import {
+  Zap, Wrench, Paintbrush, Hammer, Droplets,
+  TreePine, Truck, Cpu, ShieldCheck, HelpCircle
+} from 'lucide-react'
 
-const categoryImages = {
-  'Instalații Electrice': '⚡',
-  'Instalații Sanitare': '🔧',
-  'Zugrăveli & Vopsitorie': '🎨',
-  'Tâmplărie': '🪚',
-  'Curățenie': '✨',
-  'Grădinărit': '🌱',
-  'Reparații Generale': '🔩',
-  'Montaj Mobilă': '🪑',
-  'Tablouri Electrice': '⚙️',
-  'Iluminat': '💡',
-  'Construcții': '🏗️',
-  'Altele': '🛠️',
+// Map category name -> icon + bg color
+const CATEGORY_MAP = {
+  'electrician':    { Icon: Zap,         bg: 'bg-yellow-100', color: 'text-yellow-600' },
+  'electric':       { Icon: Zap,         bg: 'bg-yellow-100', color: 'text-yellow-600' },
+  'instalatii':     { Icon: Droplets,    bg: 'bg-blue-100',   color: 'text-blue-600'   },
+  'plumbing':       { Icon: Droplets,    bg: 'bg-blue-100',   color: 'text-blue-600'   },
+  'zugravit':       { Icon: Paintbrush,  bg: 'bg-pink-100',   color: 'text-pink-600'   },
+  'vopsit':         { Icon: Paintbrush,  bg: 'bg-pink-100',   color: 'text-pink-600'   },
+  'tamplarie':      { Icon: Hammer,      bg: 'bg-orange-100', color: 'text-orange-600' },
+  'constructii':    { Icon: Hammer,      bg: 'bg-orange-100', color: 'text-orange-600' },
+  'gradinarit':     { Icon: TreePine,    bg: 'bg-green-100',  color: 'text-green-600'  },
+  'mutari':         { Icon: Truck,       bg: 'bg-purple-100', color: 'text-purple-600' },
+  'it':             { Icon: Cpu,         bg: 'bg-cyan-100',   color: 'text-cyan-600'   },
+  'securitate':     { Icon: ShieldCheck, bg: 'bg-slate-100',  color: 'text-slate-600'  },
+  'reparatii':      { Icon: Wrench,      bg: 'bg-red-100',    color: 'text-red-600'    },
 }
 
-const categoryColors = {
-  'Instalații Electrice': 'from-yellow-400 to-orange-500',
-  'Instalații Sanitare': 'from-blue-400 to-cyan-500',
-  'Zugrăveli & Vopsitorie': 'from-pink-400 to-purple-500',
-  'Tâmplărie': 'from-amber-400 to-yellow-600',
-  'Curățenie': 'from-teal-400 to-green-500',
-  'Grădinărit': 'from-green-400 to-emerald-500',
-  'Reparații Generale': 'from-gray-400 to-slate-500',
-  'Montaj Mobilă': 'from-orange-400 to-red-500',
-  'Tablouri Electrice': 'from-indigo-400 to-blue-600',
-  'Iluminat': 'from-yellow-300 to-amber-500',
-  'Construcții': 'from-stone-400 to-stone-600',
-  'Altele': 'from-blue-400 to-indigo-500',
+function getCategoryConfig(category) {
+  if (!category) return { Icon: HelpCircle, bg: 'bg-gray-100', color: 'text-gray-400' }
+  const key = category.toLowerCase().trim()
+  // exact match
+  if (CATEGORY_MAP[key]) return CATEGORY_MAP[key]
+  // partial match
+  const found = Object.keys(CATEGORY_MAP).find(k => key.includes(k) || k.includes(key))
+  return found ? CATEGORY_MAP[found] : { Icon: Wrench, bg: 'bg-gray-100', color: 'text-gray-400' }
 }
 
-export default function TaskPhoto({ photos, category, className = 'w-full h-40' }) {
-  // Dacă are poze reale, afișează prima
-  if (photos && photos.length > 0 && photos[0] !== 'default') {
+/**
+ * TaskPhoto
+ *
+ * Props:
+ *   photos   – string[] | null   (array of URLs from Supabase storage)
+ *   category – string | null     (category name, used for the placeholder icon)
+ *   className – string           (applied to the root element, controls size/shape)
+ */
+export default function TaskPhoto({ photos, category, className = 'w-10 h-10' }) {
+  const firstPhoto = Array.isArray(photos) && photos.length > 0 ? photos[0] : null
+
+  if (firstPhoto) {
     return (
       <img
-        src={photos[0]}
-        alt="Task"
+        src={firstPhoto}
+        alt={category ?? 'task'}
         className={`${className} object-cover rounded-lg`}
+        onError={(e) => {
+          // fallback to placeholder on broken URL
+          e.currentTarget.style.display = 'none'
+          e.currentTarget.nextSibling?.style.removeProperty('display')
+        }}
       />
     )
   }
 
-  // Placeholder bazat pe categorie
-  const emoji = categoryImages[category] || '🛠️'
-  const gradient = categoryColors[category] || 'from-blue-400 to-indigo-500'
+  const { Icon, bg, color } = getCategoryConfig(category)
 
   return (
-    <div className={`${className} bg-gradient-to-br ${gradient} rounded-lg flex flex-col items-center justify-center`}>
-      <span className="text-4xl mb-2">{emoji}</span>
-      <span className="text-white text-xs font-medium opacity-80">{category || 'Task'}</span>
+    <div className={`${className} ${bg} rounded-lg flex items-center justify-center flex-shrink-0`}>
+      <Icon className={`w-1/2 h-1/2 ${color}`} />
     </div>
   )
 }
