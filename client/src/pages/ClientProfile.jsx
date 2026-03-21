@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
 import DashboardNavbar from '../components/dashboard/DashboardNavbar'
+import CityAutocomplete from '../components/CityAutocomplete'
 import {
   User, Bell, Shield, Tag, CreditCard, Star, MapPin, Wrench,
   Receipt, Palette, LogOut, ChevronRight, Camera, Edit2, X,
@@ -20,13 +21,6 @@ const sidebarItems = [
   { id: 'repairs', label: 'Istoric Comenzi', icon: Wrench },
   { id: 'billing', label: 'Date Facturare', icon: Receipt },
   { id: 'appearance', label: 'Aspect Interfață', icon: Palette },
-]
-
-// Mock data
-const mockReviews = [
-  { id: 1, handyman: 'Ion Marin', service: 'Instalare Iluminat', rating: 5, text: 'Lucrare excelentă, foarte profesionist!', date: '2026-02-15', status: 'published' },
-  { id: 2, handyman: 'Andrei Vasile', service: 'Reparație Robinet', rating: 4, text: 'Treabă bună, a venit la timp.', date: '2026-01-20', status: 'published' },
-  { id: 3, handyman: 'Elena Pop', service: 'Zugrăveli Living', rating: 5, text: 'Impecabil! Recomand cu încredere.', date: '2026-01-05', status: 'published' },
 ]
 
 const mockVouchers = [
@@ -62,6 +56,10 @@ export default function ClientProfile() {
   const [historyTab, setHistoryTab] = useState('tasks')
   const [historyTasks, setHistoryTasks] = useState([])
   const [historyBookings, setHistoryBookings] = useState([])
+  const [reviews, setReviews] = useState([])
+  const [reviewsLoading, setReviewsLoading] = useState(false)
+  const [editingReviewId, setEditingReviewId] = useState(null)
+  const [reviewEditForm, setReviewEditForm] = useState({ rating: 5, title: '', description: '' })
 
   // Notification settings
   const [notifSettings, setNotifSettings] = useState({
@@ -124,7 +122,82 @@ export default function ClientProfile() {
     .order('created_at', { ascending: false })
     setHistoryBookings(bookingsData || [])
 
+    setReviewsLoading(true)
+    const { data: reviewsData } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('reviewer_id', user.id)
+      .order('created_at', { ascending: false })
+
+    let enrichedReviews = reviewsData || []
+    const reviewedIds = [...new Set((reviewsData || []).map(r => r.reviewed_id).filter(Boolean))]
+
+    if (reviewedIds.length > 0) {
+      const { data: reviewedProfiles } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name')
+        .in('id', reviewedIds)
+
+      const reviewedNameMap = Object.fromEntries(
+        (reviewedProfiles || []).map(p => [p.id, `${p.first_name || ''} ${p.last_name || ''}`.trim()])
+      )
+
+      enrichedReviews = (reviewsData || []).map(r => ({
+        ...r,
+        handyman_name: reviewedNameMap[r.reviewed_id] || 'Handyman'
+      }))
+    }
+
+    setReviews(enrichedReviews)
+    setReviewsLoading(false)
+
     setLoading(false)
+  }
+
+  const startEditReview = (review) => {
+    setEditingReviewId(review.id)
+    setReviewEditForm({
+      rating: review.rating || 5,
+      title: review.title || '',
+      description: review.description || '',
+    })
+  }
+
+  const cancelEditReview = () => {
+    setEditingReviewId(null)
+    setReviewEditForm({ rating: 5, title: '', description: '' })
+  }
+
+  const saveReviewEdit = async (reviewId) => {
+    const payload = {
+      rating: Number(reviewEditForm.rating),
+      title: reviewEditForm.title?.trim() || null,
+      description: reviewEditForm.description?.trim() || null,
+    }
+
+    const { error } = await supabase
+      .from('reviews')
+      .update(payload)
+      .eq('id', reviewId)
+      .eq('reviewer_id', profile.id)
+
+    if (!error) {
+      setReviews(prev => prev.map(r => (r.id === reviewId ? { ...r, ...payload } : r)))
+      cancelEditReview()
+    }
+  }
+
+  const deleteReview = async (reviewId) => {
+    const { error } = await supabase
+      .from('reviews')
+      .delete()
+      .eq('id', reviewId)
+      .eq('reviewer_id', profile.id)
+
+    if (!error) {
+      setReviews(prev => prev.filter(r => r.id !== reviewId))
+      if (editingReviewId === reviewId) cancelEditReview()
+    }
   }
 
   const handleSaveProfile = async () => {
@@ -358,27 +431,19 @@ export default function ClientProfile() {
                       </div>
                     )}
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-500 mb-1">Oraș</label>
-                      {editing ? (
-                        <input type="text" value={editForm.city || ''}
-                          onChange={(e) => setEditForm(p => ({ ...p, city: e.target.value }))}
-                          className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                      ) : (
-                        <p className="text-gray-800">{profile?.city || 'Necompletat'}</p>
-                      )}
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-500 mb-1">Județ</label>
-                      {editing ? (
-                        <input type="text" value={editForm.county || ''}
-                          onChange={(e) => setEditForm(p => ({ ...p, county: e.target.value }))}
-                          className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                      ) : (
-                        <p className="text-gray-800">{profile?.county || 'Necompletat'}</p>
-                      )}
-                    </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-500 mb-1">Oraș / Județ</label>
+                    {editing ? (
+                      <CityAutocomplete
+                        value={editForm.city ? `${editForm.city}${editForm.county ? ', ' + editForm.county : ''}` : ''}
+                        onChange={(city) => setEditForm(p => ({ ...p, city: city.name, county: city.county }))}
+                        placeholder="Caută oraș..."
+                      />
+                    ) : (
+                      <p className="text-gray-800">
+                        {profile?.city ? `${profile.city}${profile.county ? ', ' + profile.county : ''}` : 'Necompletat'}
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-500 mb-1">Tip Locuință</label>
@@ -599,30 +664,98 @@ export default function ClientProfile() {
                   <p className="text-sm text-gray-500">Recenzii pe care le-ai lăsat handymanilor</p>
                 </div>
                 <div className="divide-y divide-gray-50">
-                  {mockReviews.map((review) => (
-                    <div key={review.id} className="p-5">
-                      <div className="flex items-center justify-between mb-2">
-                        <div>
-                          <p className="font-bold text-gray-800">{review.service}</p>
-                          <p className="text-sm text-gray-500">Handyman: {review.handyman}</p>
-                        </div>
-                        <div className="text-right">
-                          <div className="flex items-center gap-0.5">
-                            {[1, 2, 3, 4, 5].map(s => (
-                              <Star key={s} className={`w-4 h-4 ${s <= review.rating ? 'fill-yellow-400 text-yellow-400' : 'text-gray-200'}`} />
-                            ))}
+                  {reviewsLoading ? (
+                    <div className="p-8 text-center text-sm text-gray-500">Se încarcă recenziile...</div>
+                  ) : reviews.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-gray-500">Nu ai recenzii lăsate încă.</div>
+                  ) : (
+                    reviews.map((review) => (
+                      <div key={review.id} className="p-5">
+                        <div className="flex items-center justify-between mb-2">
+                          <div>
+                            <p className="font-bold text-gray-800">{review.title || 'Recenzie'}</p>
+                            <p className="text-sm text-gray-500">Handyman: {review.handyman_name || 'Necunoscut'}</p>
                           </div>
-                          <p className="text-xs text-gray-400 mt-1">{new Date(review.date).toLocaleDateString('ro-RO')}</p>
+                          <div className="text-right">
+                            <div className="flex items-center gap-0.5 justify-end">
+                              {[1, 2, 3, 4, 5].map(s => (
+                                <Star key={s} className={`w-4 h-4 ${s <= (review.rating || 0) ? 'fill-yellow-400 text-yellow-400' : 'text-gray-200'}`} />
+                              ))}
+                            </div>
+                            <p className="text-xs text-gray-400 mt-1">{new Date(review.created_at || review.updated_at).toLocaleDateString('ro-RO')}</p>
+                          </div>
                         </div>
+
+                        {editingReviewId === review.id ? (
+                          <div className="space-y-3 mt-3">
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">Rating</label>
+                              <select
+                                value={reviewEditForm.rating}
+                                onChange={(e) => setReviewEditForm(prev => ({ ...prev, rating: Number(e.target.value) }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              >
+                                {[1, 2, 3, 4, 5].map(r => (
+                                  <option key={r} value={r}>{r} stele</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">Titlu</label>
+                              <input
+                                type="text"
+                                value={reviewEditForm.title}
+                                onChange={(e) => setReviewEditForm(prev => ({ ...prev, title: e.target.value }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">Descriere</label>
+                              <textarea
+                                rows={3}
+                                value={reviewEditForm.description}
+                                onChange={(e) => setReviewEditForm(prev => ({ ...prev, description: e.target.value }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                              />
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => saveReviewEdit(review.id)}
+                                className="text-xs text-blue-600 font-medium hover:underline"
+                              >
+                                Salvează
+                              </button>
+                              <button
+                                onClick={cancelEditReview}
+                                className="text-xs text-gray-500 font-medium hover:underline"
+                              >
+                                Anulează
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <p className="text-sm text-gray-600">{review.description || '-'}</p>
+                            <div className="flex items-center gap-2 mt-3">
+                              <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">Publicat</span>
+                              <button
+                                onClick={() => startEditReview(review)}
+                                className="text-xs text-blue-600 font-medium hover:underline"
+                              >
+                                Editează
+                              </button>
+                              <button
+                                onClick={() => deleteReview(review.id)}
+                                className="text-xs text-red-500 font-medium hover:underline"
+                              >
+                                Șterge
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
-                      <p className="text-sm text-gray-600">{review.text}</p>
-                      <div className="flex items-center gap-2 mt-3">
-                        <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">Publicat</span>
-                        <button className="text-xs text-blue-600 font-medium hover:underline">Editează</button>
-                        <button className="text-xs text-red-500 font-medium hover:underline">Șterge</button>
-                      </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
             )}
@@ -704,19 +837,13 @@ export default function ClientProfile() {
                             placeholder="Str. Exemplu nr. 10, bl. A, ap. 5"
                             className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Oraș *</label>
-                            <input type="text" value={newAddress.city}
-                              onChange={(e) => setNewAddress(p => ({ ...p, city: e.target.value }))}
-                              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                          </div>
-                          <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Județ *</label>
-                            <input type="text" value={newAddress.county}
-                              onChange={(e) => setNewAddress(p => ({ ...p, county: e.target.value }))}
-                              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                          </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Oraș / Județ *</label>
+                          <CityAutocomplete
+                            value={newAddress.city ? `${newAddress.city}${newAddress.county ? ', ' + newAddress.county : ''}` : ''}
+                            onChange={(city) => setNewAddress(p => ({ ...p, city: city.name, county: city.county }))}
+                            placeholder="Caută oraș..."
+                          />
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">Cod Poștal</label>
