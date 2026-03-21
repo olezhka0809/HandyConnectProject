@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
+import CityAutocomplete from '../components/CityAutocomplete'
 import logo from '../assets/Logo_pin.png'
 import { 
   ChevronLeft, ChevronRight, Upload, CheckCircle,
@@ -38,6 +39,7 @@ export default function Onboarding() {
     lastName: '',
     phone: '',
     city: '',
+    county: '',
     address: '',
     propertyType: '',
     selectedServices: [],
@@ -97,6 +99,7 @@ export default function Onboarding() {
         last_name: formData.lastName,
         phone: formData.phone,
         city: formData.city,
+        county: formData.county,
         address: formData.address,
       })
       .eq('id', user.id)
@@ -272,14 +275,10 @@ export default function Onboarding() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Oraș *</label>
-                <input
-                  type="text"
-                  name="city"
-                  value={formData.city}
-                  onChange={handleChange}
-                  placeholder="Timișoara"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  required
+                <CityAutocomplete
+                  value={formData.city ? `${formData.city}${formData.county ? ', ' + formData.county : ''}` : ''}
+                  onChange={(city) => setFormData(prev => ({ ...prev, city: city.name, county: city.county }))}
+                  placeholder="Exemplu: Timișoara"
                 />
               </div>
 
