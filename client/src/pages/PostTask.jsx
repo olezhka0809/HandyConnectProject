@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
 import logo from '../assets/Logo_pin.png'
+import CityAutocomplete from '../components/CityAutocomplete'
 import {
   ChevronLeft, ChevronRight, Camera, CheckCircle, X,
   Clock, MapPin, AlertTriangle, Zap, Phone, Mail,
@@ -48,6 +49,10 @@ export default function PostTask() {
     keywords: [],
     photos: [],
     urgency: 'normal',
+    city: '',
+    county: '',
+    latitude: null,
+    longitude: null,
     address: '',
     accessInstructions: '',
     contactName: '',
@@ -74,6 +79,10 @@ export default function PostTask() {
           contactName: `${data.first_name} ${data.last_name}`,
           contactEmail: data.email,
           contactPhone: data.phone || '',
+          city: data.city || '',
+          county: data.county || '',
+          latitude: null,
+          longitude: null,
           address: data.address || '',
         }))
       }
@@ -154,7 +163,11 @@ export default function PostTask() {
           photos: [],
           status: 'pending',
           urgency: form.urgency,
+          address_city: form.city,
+          address_county: form.county,
           service_address: form.address,
+          latitude: form.latitude,
+          longitude: form.longitude,
           access_instructions: form.accessInstructions || null,
           contact_name: form.contactName,
           contact_email: form.contactEmail,
@@ -219,7 +232,7 @@ const toggleHandyman = (id) => {
   }
 
   const canProceedStep1 = form.category && form.title && form.description
-  const canProceedStep2 = form.address
+  const canProceedStep2 = form.city && form.county && form.address && form.latitude !== null && form.longitude !== null
   const canProceedStep3 = form.contactName && form.contactEmail && form.contactPhone
   const canProceedStep4 = form.sendOption === 'all' || form.proposedHandymen.length > 0
 
@@ -434,6 +447,22 @@ const toggleHandyman = (id) => {
 
               {/* Address */}
               <div>
+                <label className="block text-sm font-bold text-gray-800 mb-2">Oraș / Județ *</label>
+                <CityAutocomplete
+                  value={form.city ? `${form.city}${form.county ? ', ' + form.county : ''}` : ''}
+                  onChange={(city) => setForm(prev => ({
+                    ...prev,
+                    city: city.name,
+                    county: city.county,
+                    latitude: city.latitude || null,
+                    longitude: city.longitude || null,
+                  }))}
+                  placeholder="Exemplu: Timișoara"
+                />
+              </div>
+
+              {/* Address */}
+              <div>
                 <label className="block text-sm font-bold text-gray-800 mb-2">Adresa lucrării *</label>
                 <div className="relative">
                   <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -568,6 +597,12 @@ const toggleHandyman = (id) => {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-500">Locație:</span>
+                    <span className="font-medium text-right max-w-[200px] truncate">
+                      {form.city && form.county ? `${form.city}, ${form.county}` : '-'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Adresă:</span>
                     <span className="font-medium text-right max-w-[200px] truncate">{form.address}</span>
                   </div>
                   <div className="flex justify-between">
