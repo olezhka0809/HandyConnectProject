@@ -4,23 +4,12 @@ import { supabase } from '../supabase'
 import logo from '../assets/Logo_pin.png'
 import CityAutocomplete from '../components/CityAutocomplete'
 import {
-  ChevronLeft, ChevronRight, Camera, CheckCircle, X,
+  ChevronLeft, ChevronRight, Camera, CheckCircle, X, DollarSign,
   Clock, MapPin, AlertTriangle, Zap, Phone, Mail,
-  Tag, Image, Info, Users, Heart, Search, Star 
+  Tag, Image, Info, Users, Heart, Search, Star
 } from 'lucide-react'
 import TaskPhoto from '../components/TaskPhoto'
 
-const categoryOptions = [
-  'Instalații Sanitare',
-  'Instalații Electrice',
-  'Zugrăveli & Vopsitorie',
-  'Tâmplărie',
-  'Curățenie',
-  'Grădinărit',
-  'Reparații Generale',
-  'Montaj Mobilă',
-  'Altele',
-]
 
 const suggestedKeywords = [
   'urgent', 'reparație', 'montaj', 'instalare', 'înlocuire',
@@ -37,6 +26,7 @@ export default function PostTask() {
   const [showSuccess, setShowSuccess] = useState(false)
   const [keywordInput, setKeywordInput] = useState('')
   const [photoPreviews, setPhotoPreviews] = useState([])
+  const [dbCategories, setDbCategories] = useState([])
   const [favorites, setFavorites] = useState([])
   const [searchResults, setSearchResults] = useState([])
   const [handymanSearch, setHandymanSearch] = useState('')
@@ -60,6 +50,7 @@ export default function PostTask() {
     contactPhone: '',
     contactMethod: 'phone',
     specialInstructions: '',
+    budget: '',
     insuranceRequired: false,
     notifyFavorites: false,
     notifySpecific: false,
@@ -86,6 +77,14 @@ export default function PostTask() {
           address: data.address || '',
         }))
       }
+      // Încarcă categoriile din DB
+      const { data: catsData } = await supabase
+        .from('categories')
+        .select('id, name, icon')
+        .eq('is_active', true)
+        .order('name')
+      setDbCategories(catsData || [])
+
       // Încarcă favoriții
     const { data: favData } = await supabase
         .from('favorite_handymen')
@@ -142,15 +141,7 @@ export default function PostTask() {
   const handleSubmit = async () => {
     setLoading(true)
     try {
-      const categoryName = form.category === 'Altele' 
-        ? (form.customCategory || 'Altele') 
-        : form.category
-
-      const { data: categoryData } = await supabase
-        .from('categories')
-        .select('id')
-        .eq('name', categoryName)
-        .single()
+      const categoryId = dbCategories.find(c => c.name === form.category)?.id || null
 
       const { data: taskData, error: taskError } = await supabase
         .from('tasks')
@@ -158,11 +149,12 @@ export default function PostTask() {
           client_id: user.id,
           title: form.title,
           description: form.description,
-          category_id: categoryData?.id || null,
+          category_id: categoryId,
           keywords: form.keywords,
           photos: [],
           status: 'pending',
           urgency: form.urgency,
+          budget: form.budget ? Number(form.budget) : null,
           address_city: form.city,
           address_county: form.county,
           service_address: form.address,
@@ -188,7 +180,25 @@ export default function PostTask() {
         return
       }
 
-      console.log('Task creat:', taskData)
+      // Upload photos to Supabase Storage
+      if (form.photos.length > 0) {
+        const uploadedUrls = []
+        for (const file of form.photos) {
+          const ext = file.name.split('.').pop()
+          const path = `${user.id}/${taskData.id}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+          const { error: upErr } = await supabase.storage
+            .from('task-photos')
+            .upload(path, file, { contentType: file.type })
+          if (!upErr) {
+            const { data: urlData } = supabase.storage.from('task-photos').getPublicUrl(path)
+            uploadedUrls.push(urlData.publicUrl)
+          }
+        }
+        if (uploadedUrls.length > 0) {
+          await supabase.from('tasks').update({ photos: uploadedUrls }).eq('id', taskData.id)
+        }
+      }
+
       setLoading(false)
       setShowSuccess(true)
 
@@ -274,23 +284,23 @@ const toggleHandyman = (id) => {
               <div>
                 <h3 className="font-bold text-gray-800 mb-3">Selectează categoria</h3>
                 <div className="grid grid-cols-2 gap-2">
-                  {categoryOptions.map((cat) => (
+                  {dbCategories.map((cat) => (
                     <button
-                      key={cat}
-                      onClick={() => update('category', cat)}
+                      key={cat.id}
+                      onClick={() => update('category', cat.name)}
                       className={`flex items-center gap-2 px-4 py-3 rounded-xl border-2 text-left text-sm transition-all
-                        ${form.category === cat
+                        ${form.category === cat.name
                           ? 'border-blue-600 bg-blue-50 text-blue-600'
                           : 'border-gray-200 text-gray-700 hover:border-blue-300'
                         }
                       `}
                     >
                       <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0
-                        ${form.category === cat ? 'border-blue-600' : 'border-gray-300'}
+                        ${form.category === cat.name ? 'border-blue-600' : 'border-gray-300'}
                       `}>
-                        {form.category === cat && <div className="w-2 h-2 bg-blue-600 rounded-full" />}
+                        {form.category === cat.name && <div className="w-2 h-2 bg-blue-600 rounded-full" />}
                       </div>
-                      {cat}
+                      {cat.name}
                     </button>
                   ))}
                 </div>
@@ -442,6 +452,24 @@ const toggleHandyman = (id) => {
                       </div>
                     </button>
                   ))}
+                </div>
+              </div>
+
+              {/* Budget */}
+              <div>
+                <label className="block text-sm font-bold text-gray-800 mb-2">Buget estimat (opțional)</label>
+                <p className="text-xs text-gray-500 mb-3">Indică suma maximă pe care ești dispus să o plătești. Handymanii pot face oferte sub sau la nivelul bugetului tău.</p>
+                <div className="relative">
+                  <DollarSign className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="number"
+                    min="0"
+                    value={form.budget}
+                    onChange={(e) => update('budget', e.target.value)}
+                    placeholder="Ex: 500"
+                    className="w-full pl-11 pr-16 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-gray-400 font-medium">RON</span>
                 </div>
               </div>
 
@@ -605,6 +633,12 @@ const toggleHandyman = (id) => {
                     <span className="text-gray-500">Adresă:</span>
                     <span className="font-medium text-right max-w-[200px] truncate">{form.address}</span>
                   </div>
+                  {form.budget && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Buget:</span>
+                      <span className="font-medium">{Number(form.budget).toLocaleString('ro-RO')} RON</span>
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <span className="text-gray-500">Poze:</span>
                     <span className="font-medium">{photoPreviews.length} adăugate</span>
