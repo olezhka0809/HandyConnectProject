@@ -213,16 +213,16 @@ export default function HandymanFeed() {
   // ─── FILTERS ─────────────────────────────────────────
   function applyFilters() {
     let result = [...tasks]
-
+    result = result.filter(t => !t.my_offer_status)
     if (searchQuery) {
-      const q = searchQuery.toLowerCase()
-      result = result.filter(t =>
-        t.title?.toLowerCase().includes(q) ||
-        t.description?.toLowerCase().includes(q) ||
-        t.category_name?.toLowerCase().includes(q) ||
-        t.keywords?.some(k => k.toLowerCase().includes(q))
-      )
-    }
+        const q = searchQuery.toLowerCase()
+        result = result.filter(t =>
+          t.title?.toLowerCase().includes(q) ||
+          t.description?.toLowerCase().includes(q) ||
+          t.category_name?.toLowerCase().includes(q) ||
+          t.keywords?.some(k => k.toLowerCase().includes(q))
+        )
+      }
 
     if (categoryFilter !== 'all') {
       result = result.filter(t => t.category_name === categoryFilter)
