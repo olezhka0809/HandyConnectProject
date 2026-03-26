@@ -1,5 +1,5 @@
-import { Link, useLocation } from 'react-router-dom'
-import { Home, Briefcase, Star, Settings, MessageSquare, Bell, Wrench, Navigation } from 'lucide-react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Home, Briefcase, Star, Settings, MessageSquare, Bell, Wrench, Navigation, LogOut } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { supabase } from '../../supabase'
 import logo from '../../assets/Logo_pin.png'
@@ -15,6 +15,7 @@ const navLinks = [
 
 export default function HandymanNavbar() {
   const location = useLocation()
+  const navigate = useNavigate()
   const [profile, setProfile] = useState(null)
   const [showNotifications, setShowNotifications] = useState(false)
 
@@ -34,6 +35,11 @@ export default function HandymanNavbar() {
   const initials = profile
     ? `${profile.first_name?.[0] || ''}${profile.last_name?.[0] || ''}`.toUpperCase()
     : '?'
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    navigate('/login')
+  }
 
   return (
     <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
@@ -68,6 +74,15 @@ export default function HandymanNavbar() {
               className="relative w-10 h-10 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 hover:text-blue-600 transition">
               <Bell className="w-5 h-5" />
               <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-white text-[10px] flex items-center justify-center font-bold">5</span>
+            </button>
+            <button
+              onClick={handleLogout}
+              className="h-10 px-3 rounded-lg border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition inline-flex items-center gap-1.5 text-sm font-semibold"
+              aria-label="Deconectare"
+              title="Deconectare"
+            >
+              <LogOut className="w-4 h-4" />
+              Deconectare
             </button>
             <Link
               to="/handyman/personal-profile"
