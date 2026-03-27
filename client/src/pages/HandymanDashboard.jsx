@@ -3,8 +3,9 @@ import { useNavigate, Link } from 'react-router-dom'
 import { supabase } from '../supabase'
 import HandymanNavbar from '../components/handyman-dashboard/HandymanNavbar'
 import JobRequestModal from '../components/handyman-dashboard/JobRequestModal'
+import TaskDetailModal from '../components/handyman-dashboard/TaskDetailModal'
 import {
-  MessageCircle, CheckCircle, XCircle, Clock, MapPin, Camera,
+  MessageCircle, MapPin, Camera,
   Briefcase, Star, TrendingUp, Eye, DollarSign, Users,
   ChevronRight, Calendar, Award, BarChart3, Target
 } from 'lucide-react'
@@ -95,13 +96,127 @@ export default function HandymanDashboard() {
   const [profile, setProfile] = useState(null)
   const [selectedJob, setSelectedJob] = useState(null)
   const [tab, setTab] = useState('overview')
+  const [stats, setStats] = useState({
+    newRequests:     null,
+    activeJobs:      null,
+    weeklyEarnings:  null,
+    availableNow:    null,
+    ratingAvg:       null,
+    totalReviews:    null,
+  })
+  const [recentJobs, setRecentJobs] = useState(null)
+  const [selectedTaskId, setSelectedTaskId] = useState(null)
 
   useEffect(() => {
     async function loadData() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { navigate('/login'); return }
-      const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single()
-      setProfile(data)
+
+      const [profileRes, hpRes] = await Promise.all([
+        supabase.from('profiles').select('*').eq('id', user.id).single(),
+        supabase.from('handyman_profiles').select('rating_avg').eq('user_id', user.id).maybeSingle(),
+      ])
+      setProfile(profileRes.data)
+
+      // ── Cereri noi: tasks propuse specific acestui handyman (de client) ce sunt încă open
+      const { count: newRequestsCount } = await supabase
+        .from('tasks')
+        .select('id', { count: 'exact', head: true })
+        .contains('proposed_to', [user.id])
+        .eq('status', 'open')
+
+      // ── Job-uri active: tasks acceptate de/asignate handymanului, în desfășurare
+      const { count: activeCount } = await supabase
+        .from('tasks')
+        .select('id', { count: 'exact', head: true })
+        .eq('handyman_id', user.id)
+        .in('status', ['in_progress', 'accepted', 'assigned'])
+
+      // ── Câștiguri săptămâna aceasta: job_completions cu client_accepted = true
+      const monday = new Date()
+      monday.setDate(monday.getDate() - (monday.getDay() === 0 ? 6 : monday.getDay() - 1))
+      monday.setHours(0, 0, 0, 0)
+      const mondayISO = monday.toISOString()
+
+      // Data disponibilă = marcat ca finalizat de client cu cel puțin 3 zile în urmă
+      const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString()
+
+      const { data: weeklyCompletions } = await supabase
+        .from('job_completions')
+        .select('job_id, job_type, client_responded_at')
+        .eq('handyman_id', user.id)
+        .eq('client_accepted', true)
+        .gte('client_responded_at', mondayISO)
+
+      // Calculează câștigurile din bugetele task-urilor finalizate
+      let weeklyEarnings = 0
+      let availableNow   = 0
+      const taskIds = (weeklyCompletions ?? []).filter(c => c.job_type === 'task').map(c => c.job_id)
+      if (taskIds.length > 0) {
+        const { data: taskData } = await supabase
+          .from('tasks')
+          .select('id, budget')
+          .in('id', taskIds)
+        const budgetMap = Object.fromEntries((taskData ?? []).map(t => [t.id, parseFloat(t.budget) || 0]))
+        for (const c of weeklyCompletions ?? []) {
+          const amount = budgetMap[c.job_id] ?? 0
+          weeklyEarnings += amount
+          if (c.client_responded_at <= threeDaysAgo) availableNow += amount
+        }
+      }
+
+      setStats({
+        newRequests:    newRequestsCount ?? 0,
+        activeJobs:     activeCount ?? 0,
+        weeklyEarnings,
+        availableNow,
+        ratingAvg:      hpRes.data?.rating_avg ?? null,
+        totalReviews:   null,
+      })
+
+      // ── Cereri de Job Recente: propuse + acceptate ──
+      const [proposedRes, activeRes, bookingsRes] = await Promise.all([
+        // Tasks propuse specific acestui handyman (open)
+        supabase.from('tasks')
+          .select('id, title, urgency, budget, scheduled_date, scheduled_time, address_city, photos, status, created_at, profiles!tasks_client_id_fkey(first_name, last_name)')
+          .contains('proposed_to', [user.id])
+          .eq('status', 'open')
+          .order('created_at', { ascending: false })
+          .limit(4),
+
+        // Tasks deja acceptate/active ale handymanului
+        supabase.from('tasks')
+          .select('id, title, urgency, budget, scheduled_date, scheduled_time, address_city, photos, status, created_at, profiles!tasks_client_id_fkey(first_name, last_name)')
+          .eq('handyman_id', user.id)
+          .in('status', ['in_progress', 'accepted', 'assigned'])
+          .order('created_at', { ascending: false })
+          .limit(4),
+
+        // Rezervări active
+        supabase.from('bookings')
+          .select('id, contact_name, scheduled_date, scheduled_time, service_address, status, total, created_at, handyman_services(title)')
+          .eq('handyman_id', user.id)
+          .in('status', ['upcoming', 'confirmed', 'accepted', 'pending'])
+          .order('created_at', { ascending: false })
+          .limit(3),
+      ])
+
+      const proposed = (proposedRes.data ?? []).map(t => ({ ...t, _type: 'task', _isNew: true, urgency_level: t.urgency, address_county: t.address_city }))
+      const active   = (activeRes.data ?? []).map(t => ({ ...t, _type: 'task', _isNew: false, urgency_level: t.urgency, address_county: t.address_city }))
+      const bookings = (bookingsRes.data ?? []).map(b => ({
+        ...b, _type: 'booking', _isNew: false,
+        title: b.handyman_services?.title ?? `Rezervare #${b.id.slice(0, 6)}`,
+        urgency_level: 'normal',
+        budget: b.total,
+        address_county: b.service_address,
+        profiles: { first_name: b.contact_name ?? 'Client', last_name: '' },
+      }))
+
+      const combined = [...proposed, ...active, ...bookings]
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        .slice(0, 6)
+
+      setRecentJobs(combined)
     }
     loadData()
   }, [navigate])
@@ -138,10 +253,36 @@ export default function HandymanDashboard() {
         {/* Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           {[
-            { label: 'Cereri Noi', value: '10', change: '+3 azi', changeColor: 'text-green-600', icon: MessageCircle, color: 'bg-blue-100 text-blue-600' },
-            { label: 'Job-uri Active', value: '7', change: '2 în progres', changeColor: 'text-gray-500', icon: Briefcase, color: 'bg-green-100 text-green-600' },
-            { label: 'Câștiguri săptămâna aceasta', value: '4.560 RON', change: '+3 azi', changeColor: 'text-green-600', icon: DollarSign, color: 'bg-purple-100 text-purple-600' },
-            { label: 'Rating Mediu', value: '4.9', change: '12 recenzii recente', changeColor: 'text-gray-500', icon: Star, color: 'bg-yellow-100 text-yellow-600' },
+            {
+              label: 'Cereri Noi',
+              value: stats.newRequests === null ? '—' : String(stats.newRequests),
+              change: stats.newRequests === null ? 'Se încarcă…' : stats.newRequests === 0 ? 'Nicio cerere nouă' : `${stats.newRequests} task${stats.newRequests !== 1 ? '-uri' : ''} propuse ție`,
+              changeColor: stats.newRequests > 0 ? 'text-green-600' : 'text-gray-400',
+              icon: MessageCircle, color: 'bg-blue-100 text-blue-600',
+            },
+            {
+              label: 'Job-uri Active',
+              value: stats.activeJobs === null ? '—' : String(stats.activeJobs),
+              change: stats.activeJobs === null ? 'Se încarcă…' : stats.activeJobs === 0 ? 'Niciun job activ' : `${stats.activeJobs} în desfășurare`,
+              changeColor: 'text-gray-500',
+              icon: Briefcase, color: 'bg-green-100 text-green-600',
+            },
+            {
+              label: 'Câștiguri săptămâna aceasta',
+              value: stats.weeklyEarnings === null ? '—' : `${stats.weeklyEarnings.toLocaleString('ro-RO')} RON`,
+              change: stats.availableNow !== null && stats.availableNow > 0
+                ? `${stats.availableNow.toLocaleString('ro-RO')} RON disponibili acum`
+                : stats.weeklyEarnings > 0 ? 'Disponibil după 3 zile' : 'Nicio plată săptămâna aceasta',
+              changeColor: stats.availableNow > 0 ? 'text-green-600' : 'text-gray-400',
+              icon: DollarSign, color: 'bg-purple-100 text-purple-600',
+            },
+            {
+              label: 'Rating Mediu',
+              value: stats.ratingAvg === null ? '—' : Number(stats.ratingAvg).toFixed(1),
+              change: stats.ratingAvg === null ? 'Se încarcă…' : `din 5.0 stele`,
+              changeColor: 'text-gray-500',
+              icon: Star, color: 'bg-yellow-100 text-yellow-600',
+            },
           ].map((stat) => (
             <div key={stat.label} className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
               <div className="flex items-center justify-between mb-3">
@@ -182,48 +323,75 @@ export default function HandymanDashboard() {
                   <Link to="/handyman/jobs" className="text-sm text-blue-600 font-medium hover:underline">Vezi toate</Link>
                 </div>
                 <div className="divide-y divide-gray-50">
-                  {mockRequests.map((req, i) => (
-                    <div key={i} className="p-5 cursor-pointer hover:bg-gray-50 transition" onClick={() => setSelectedJob(req)}>
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h4 className="font-bold text-gray-800">{req.title}</h4>
-                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium
-                              ${req.urgency === 'high' ? 'bg-red-100 text-red-700' :
-                                req.urgency === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-green-100 text-green-700'}
-                            `}>
-                              {req.urgency === 'high' ? 'Urgent' : req.urgency === 'medium' ? 'Mediu' : 'Normal'}
-                            </span>
-                          </div>
-                          <p className="text-sm text-gray-500 mt-0.5">{req.client}</p>
-                        </div>
-                        <span className="font-bold text-blue-600">{req.price}</span>
-                      </div>
-                      <div className="flex items-center gap-4 text-xs text-gray-400 mb-3">
-                        <div className="flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          <span>{req.date}</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <Camera className="w-3 h-3" />
-                          <span>{req.photos} poze</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <MapPin className="w-3 h-3" />
-                          <span>{req.address}</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button className="flex items-center gap-1 px-4 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition">
-                          <CheckCircle className="w-3 h-3" /> Acceptă
-                        </button>
-                        <button className="flex items-center gap-1 px-4 py-1.5 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 transition">
-                          <XCircle className="w-3 h-3" /> Refuză
-                        </button>
-                      </div>
+                  {recentJobs === null ? (
+                    <div className="p-8 flex items-center justify-center">
+                      <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                     </div>
-                  ))}
+                  ) : recentJobs.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-gray-400">
+                      Nicio cerere sau job activ momentan.
+                    </div>
+                  ) : recentJobs.map((job) => {
+                    const clientName = job.profiles
+                      ? `${job.profiles.first_name ?? ''} ${job.profiles.last_name ?? ''}`.trim() || 'Client'
+                      : 'Client'
+                    const urgency = job.urgency_level ?? 'normal'
+                    const urgencyLabel = urgency === 'high' ? 'Urgent' : urgency === 'medium' ? 'Mediu' : 'Normal'
+                    const urgencyCls   = urgency === 'high' ? 'bg-red-100 text-red-700' : urgency === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+                    const statusLabel  = job._isNew ? 'Cerere nouă' : job._type === 'booking' ? 'Rezervare' : job.status === 'in_progress' ? 'În progres' : 'Acceptat'
+                    const statusCls    = job._isNew ? 'bg-blue-100 text-blue-700' : job.status === 'in_progress' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'
+                    const dateStr      = job.scheduled_date
+                      ? new Date(job.scheduled_date).toLocaleDateString('ro-RO', { day: '2-digit', month: 'short', year: 'numeric' }) + (job.scheduled_time ? ` · ${job.scheduled_time}` : '')
+                      : '—'
+                    const photosCount  = Array.isArray(job.photos) ? job.photos.length : 0
+
+                    const isTask = job._type === 'task'
+                    return (
+                      <div key={job.id}
+                        className={`p-5 transition ${isTask ? 'cursor-pointer hover:bg-blue-50' : 'hover:bg-gray-50'}`}
+                        onClick={() => isTask && setSelectedTaskId(job.id)}
+                      >
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="font-bold text-gray-800 text-sm truncate">{job.title}</h4>
+                              {/* tip badge */}
+                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold flex-shrink-0 border ${
+                                isTask ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-purple-50 text-purple-600 border-purple-200'
+                              }`}>
+                                <Briefcase className="w-2.5 h-2.5" />
+                                {isTask ? 'Task' : 'Rezervare'}
+                              </span>
+                              <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${urgencyCls}`}>{urgencyLabel}</span>
+                              <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${statusCls}`}>{statusLabel}</span>
+                            </div>
+                            <p className="text-sm text-gray-500 mt-0.5">{clientName}</p>
+                          </div>
+                          {job.budget && (
+                            <span className="font-bold text-blue-600 text-sm ml-3 flex-shrink-0">{job.budget} RON</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-4 text-xs text-gray-400">
+                          <div className="flex items-center gap-1">
+                            <Calendar className="w-3 h-3" />
+                            <span>{dateStr}</span>
+                          </div>
+                          {photosCount > 0 && (
+                            <div className="flex items-center gap-1">
+                              <Camera className="w-3 h-3" />
+                              <span>{photosCount} poze</span>
+                            </div>
+                          )}
+                          {job.address_county && (
+                            <div className="flex items-center gap-1">
+                              <MapPin className="w-3 h-3" />
+                              <span>{job.address_county}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
@@ -446,6 +614,12 @@ export default function HandymanDashboard() {
           </div>
         </div>
       </div>
+      <TaskDetailModal
+        taskId={selectedTaskId}
+        onClose={() => setSelectedTaskId(null)}
+        onNegotiate={() => setSelectedTaskId(null)}
+      />
+
       {/* Job Request Modal */}
         {selectedJob && (
           <JobRequestModal
