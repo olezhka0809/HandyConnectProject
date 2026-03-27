@@ -388,6 +388,12 @@ function CompletionApprovalSection({ completion, taskId, taskTitle, handymanId, 
   const [rejectionPhotoPreviews, setRejectionPhotoPreviews] = useState([])
   const [rejectionPhotoFiles,  setRejectionPhotoFiles]  = useState([])
 
+  // review reply state
+  const [reviewData,           setReviewData]           = useState(null)
+  const [clientReplyText,      setClientReplyText]      = useState('')
+  const [clientReplySaving,    setClientReplySaving]    = useState(false)
+  const [showClientReplyForm,  setShowClientReplyForm]  = useState(false)
+
   useEffect(() => {
     supabase.from('rejection_reasons').select('id, name').eq('is_active', true)
       .then(({ data }) => setRejectionReasons(data ?? []))
@@ -399,6 +405,37 @@ function CompletionApprovalSection({ completion, taskId, taskTitle, handymanId, 
       .select('id').eq('client_id', clientId).eq('handyman_id', handymanId).maybeSingle()
       .then(({ data }) => setIsFav(!!data))
   }, [handymanId, clientId])
+
+  // load review (to show handyman reply + client reply)
+  useEffect(() => {
+    if (!taskId || !localData?.client_accepted) return
+    supabase.from('reviews')
+      .select('id, owner_reply, owner_reply_at, client_reply, client_reply_at')
+      .eq('task_id', taskId)
+      .eq('review_type', 'for_handyman')
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) {
+          setReviewData(data)
+          setClientReplyText(data.client_reply ?? '')
+        }
+      })
+  }, [taskId, localData?.client_accepted])
+
+  const submitClientReply = async () => {
+    if (!reviewData?.id || !clientReplyText.trim()) return
+    setClientReplySaving(true)
+    const now = new Date().toISOString()
+    const { error } = await supabase.from('reviews').update({
+      client_reply: clientReplyText.trim(),
+      client_reply_at: now,
+    }).eq('id', reviewData.id)
+    if (!error) {
+      setReviewData(prev => ({ ...prev, client_reply: clientReplyText.trim(), client_reply_at: now }))
+      setShowClientReplyForm(false)
+    }
+    setClientReplySaving(false)
+  }
 
   const toggleFavorite = async () => {
     if (!handymanId || favLoading) return
@@ -700,22 +737,86 @@ function CompletionApprovalSection({ completion, taskId, taskTitle, handymanId, 
           </>
         )}
 
-        {/* ── APPROVED: show submitted review ── */}
+        {/* ── APPROVED: show submitted review + handyman reply + client reply ── */}
         {isApproved && (
-          <div className="border-t border-green-200 pt-4 space-y-2">
-            <div className="flex items-center gap-2">
-              <StarRating value={localData.client_rating ?? 0} readOnly />
-              <span className="text-sm font-bold text-green-700">{localData.client_rating}/5</span>
+          <div className="border-t border-green-200 pt-4 space-y-3">
+            {/* Client review */}
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <StarRating value={localData.client_rating ?? 0} readOnly />
+                <span className="text-sm font-bold text-green-700">{localData.client_rating}/5</span>
+              </div>
+              {localData.client_review && (
+                <p className="text-sm text-gray-700 italic bg-white/70 rounded-xl p-3 border border-green-100">
+                  "{localData.client_review}"
+                </p>
+              )}
+              {localData.client_responded_at && (
+                <p className="text-xs text-gray-400">
+                  Aprobat pe {new Date(localData.client_responded_at).toLocaleDateString('ro-RO', { day: '2-digit', month: 'long', year: 'numeric' })}
+                </p>
+              )}
             </div>
-            {localData.client_review && (
-              <p className="text-sm text-gray-700 italic bg-white/70 rounded-xl p-3 border border-green-100">
-                "{localData.client_review}"
-              </p>
+
+            {/* Handyman reply */}
+            {reviewData?.owner_reply && (
+              <div className="bg-blue-50 border-l-4 border-blue-400 rounded-xl p-3 space-y-1">
+                <p className="text-xs font-bold text-blue-600 uppercase tracking-wide">Răspuns handyman</p>
+                <p className="text-sm text-gray-700">{reviewData.owner_reply}</p>
+                {reviewData.owner_reply_at && (
+                  <p className="text-xs text-gray-400">
+                    {new Date(reviewData.owner_reply_at).toLocaleDateString('ro-RO', { day: '2-digit', month: 'short', year: 'numeric' })}
+                  </p>
+                )}
+              </div>
             )}
-            {localData.client_responded_at && (
-              <p className="text-xs text-gray-400">
-                Aprobat pe {new Date(localData.client_responded_at).toLocaleDateString('ro-RO', { day: '2-digit', month: 'long', year: 'numeric' })}
-              </p>
+
+            {/* Client reply to handyman */}
+            {reviewData?.owner_reply && (
+              reviewData.client_reply ? (
+                <div className="bg-gray-50 border-l-4 border-gray-300 rounded-xl p-3 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">Răspunsul tău</p>
+                    <button onClick={() => setShowClientReplyForm(true)}
+                      className="text-xs text-blue-600 hover:underline">Editează</button>
+                  </div>
+                  <p className="text-sm text-gray-700">{reviewData.client_reply}</p>
+                </div>
+              ) : (
+                !showClientReplyForm && (
+                  <button onClick={() => setShowClientReplyForm(true)}
+                    className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 font-medium transition">
+                    <MessageSquare className="w-4 h-4" /> Răspunde handymanului
+                  </button>
+                )
+              )
+            )}
+
+            {/* Client reply form */}
+            {showClientReplyForm && reviewData?.owner_reply && (
+              <div className="border border-gray-200 rounded-xl p-3 bg-white space-y-2">
+                <p className="text-xs font-bold text-gray-600">
+                  {reviewData.client_reply ? 'Editează răspunsul tău' : 'Răspunde handymanului'}
+                </p>
+                <textarea
+                  value={clientReplyText}
+                  onChange={e => setClientReplyText(e.target.value)}
+                  rows={3}
+                  placeholder="Scrie răspunsul tău..."
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"
+                />
+                <div className="flex gap-2">
+                  <button onClick={() => { setShowClientReplyForm(false); setClientReplyText(reviewData.client_reply ?? '') }}
+                    className="flex items-center gap-1 px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
+                    <X className="w-3.5 h-3.5" /> Anulează
+                  </button>
+                  <button onClick={submitClientReply} disabled={clientReplySaving || !clientReplyText.trim()}
+                    className="flex items-center gap-1 px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition">
+                    {clientReplySaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                    Trimite
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         )}
