@@ -66,7 +66,8 @@ export default function HandymanReviews() {
         supabase.from('reviews')
           .select(`
             id, rating, title, description, created_at,
-            helpful_count, owner_reply, owner_reply_at, tags, photos,
+            helpful_count, owner_reply, owner_reply_at,
+            client_reply, client_reply_at, tags, photos,
             reviewer:reviewer_id(id, first_name, last_name, avatar_url),
             task:task_id(title, categories(name))
           `)
@@ -356,6 +357,25 @@ export default function HandymanReviews() {
                           className="text-xs text-blue-600 hover:underline">Editează</button>
                       </div>
                       <p className="text-sm text-gray-700">{review.owner_reply}</p>
+                    </div>
+                  )}
+
+                  {/* Client reply to handyman */}
+                  {review.client_reply && (
+                    <div className="bg-gray-50 rounded-xl p-4 mb-3 border-l-4 border-gray-300">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Avatar
+                          name={review.reviewer ? `${review.reviewer.first_name ?? ''} ${review.reviewer.last_name ?? ''}`.trim() : 'Client'}
+                          avatarUrl={review.reviewer?.avatar_url}
+                        />
+                        <div>
+                          <span className="font-bold text-gray-800 text-sm">
+                            {review.reviewer ? `${review.reviewer.first_name ?? ''} ${review.reviewer.last_name ?? ''}`.trim() || 'Client' : 'Client'}
+                          </span>
+                          <p className="text-xs text-gray-400">{fmtDate(review.client_reply_at)}</p>
+                        </div>
+                      </div>
+                      <p className="text-sm text-gray-700">{review.client_reply}</p>
                     </div>
                   )}
 
