@@ -276,7 +276,7 @@ export default function HandymanMyProfile() {
           </div>
         )}
 
-        <div className="max-w-4xl space-y-5">
+        <div className="space-y-5">
 
             {/* ── HERO PROFILE CARD ── */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -505,6 +505,8 @@ export default function HandymanMyProfile() {
               )}
             </div>
 
+            <CompletionWidget checks={completionChecks}/>
+
             {/* ── TABS ── */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
               <div className="flex border-b border-gray-100">
@@ -680,7 +682,6 @@ export default function HandymanMyProfile() {
                 )}
               </div>
             </div>
-          <CompletionWidget checks={completionChecks}/>
 
         </div>
       </div>

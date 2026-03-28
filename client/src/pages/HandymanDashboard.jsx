@@ -7,7 +7,8 @@ import TaskDetailModal from '../components/handyman-dashboard/TaskDetailModal'
 import {
   MessageCircle, MapPin, Camera,
   Briefcase, Star, TrendingUp, Eye, DollarSign, Users,
-  ChevronRight, Calendar, Award, BarChart3, Target
+  ChevronRight, Calendar, Award, BarChart3, Target,
+  Clock, Play, CalendarClock, Loader2, CheckCircle2
 } from 'lucide-react'
 
 const mockRequests = [
@@ -49,12 +50,6 @@ const mockRequests = [
   },
 ]
 
-const todaySchedule = [
-  { time: '9:00AM', title: 'Reparație Circuit Urgentă', client: 'Fatima Ionescu', duration: '1-3 ore', status: 'În progres', statusColor: 'bg-green-100 text-green-700' },
-  { time: '5:00PM', title: 'Upgrade Panou Electric', client: 'Mihai Stancu', duration: '3 ore', status: 'Programat', statusColor: 'bg-blue-100 text-blue-700' },
-  { time: '7:00PM', title: 'Înlocuire Întrerupător', client: 'Dan Nistor', duration: '1 oră', status: 'Confirmat', statusColor: 'bg-yellow-100 text-yellow-700' },
-  { time: '8:00PM', title: 'Instalare Iluminat', client: 'Ana Dragomir', duration: '45 min', status: 'Programat', statusColor: 'bg-blue-100 text-blue-700' },
-]
 
 const monthlyData = [
   { month: 'Ian', revenue: 5000, jobs: 8 },
@@ -106,6 +101,8 @@ export default function HandymanDashboard() {
   })
   const [recentJobs, setRecentJobs] = useState(null)
   const [selectedTaskId, setSelectedTaskId] = useState(null)
+  const [todayItems, setTodayItems] = useState(null)
+  const [startingJobId, setStartingJobId] = useState(null)
 
   useEffect(() => {
     async function loadData() {
@@ -217,9 +214,57 @@ export default function HandymanDashboard() {
         .slice(0, 6)
 
       setRecentJobs(combined)
+
+      // ── Programul de Azi ──────────────────────────────────────────────────
+      const todayISO = new Date().toISOString().split('T')[0]
+      const [todayTasksRes, todayBookingsRes] = await Promise.all([
+        supabase.from('tasks')
+          .select('id, title, scheduled_time, status, urgency, profiles!tasks_client_id_fkey(first_name, last_name)')
+          .eq('handyman_id', user.id)
+          .eq('scheduled_date', todayISO)
+          .in('status', ['accepted', 'assigned', 'in_progress'])
+          .order('scheduled_time', { ascending: true }),
+
+        supabase.from('bookings')
+          .select('id, contact_name, scheduled_time, status, handyman_services(title)')
+          .eq('handyman_id', user.id)
+          .eq('scheduled_date', todayISO)
+          .in('status', ['confirmed', 'upcoming', 'accepted', 'pending'])
+          .order('scheduled_time', { ascending: true }),
+      ])
+
+      const todayTasks = (todayTasksRes.data ?? []).map(t => ({
+        id: t.id, _type: 'task',
+        title: t.title,
+        time: t.scheduled_time ?? '—',
+        status: t.status,
+        client: t.profiles ? `${t.profiles.first_name ?? ''} ${t.profiles.last_name ?? ''}`.trim() || 'Client' : 'Client',
+      }))
+      const todayBookings = (todayBookingsRes.data ?? []).map(b => ({
+        id: b.id, _type: 'booking',
+        title: b.handyman_services?.title ?? `Rezervare #${b.id.slice(0, 6)}`,
+        time: b.scheduled_time ?? '—',
+        status: b.status,
+        client: b.contact_name ?? 'Client',
+      }))
+
+      const allToday = [...todayTasks, ...todayBookings].sort((a, b) => {
+        if (a.time === '—') return 1
+        if (b.time === '—') return -1
+        return a.time.localeCompare(b.time)
+      })
+      setTodayItems(allToday)
     }
     loadData()
   }, [navigate])
+
+  const handleStartJob = async (item) => {
+    setStartingJobId(item.id)
+    const table = item._type === 'booking' ? 'bookings' : 'tasks'
+    await supabase.from(table).update({ status: 'in_progress' }).eq('id', item.id)
+    setTodayItems(prev => (prev ?? []).map(i => i.id === item.id ? { ...i, status: 'in_progress' } : i))
+    setStartingJobId(null)
+  }
 
   const maxRevenue = Math.max(...monthlyData.map(d => d.revenue))
   const maxWeekly = Math.max(...weeklyBookings.map(d => d.count))
@@ -396,29 +441,98 @@ export default function HandymanDashboard() {
               </div>
 
               {/* Today's Schedule */}
-              <div className="lg:col-span-2 bg-white rounded-xl border border-gray-100 shadow-sm">
-                <div className="p-5 border-b border-gray-100">
+              <div className="lg:col-span-2 bg-white rounded-xl border border-gray-100 shadow-sm flex flex-col">
+                <div className="p-5 border-b border-gray-100 flex items-center justify-between">
                   <h3 className="font-bold text-gray-800">Programul de Azi</h3>
+                  <span className="text-xs text-gray-400 bg-gray-50 px-2 py-1 rounded-lg">
+                    {new Date().toLocaleDateString('ro-RO', { weekday: 'long', day: '2-digit', month: 'short' })}
+                  </span>
                 </div>
-                <div className="p-5 space-y-4">
-                  {todaySchedule.map((item, i) => (
-                    <div key={i} className="flex gap-4">
-                      <div className="text-right w-16 flex-shrink-0">
-                        <p className="text-sm font-bold text-gray-800">{item.time}</p>
-                      </div>
-                      <div className="flex-1 border-l-2 border-gray-200 pl-4">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-medium text-gray-800 text-sm">{item.title}</h4>
-                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${item.statusColor}`}>
-                            {item.status}
-                          </span>
+
+                {todayItems === null ? (
+                  <div className="flex-1 flex items-center justify-center py-10">
+                    <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
+                  </div>
+                ) : todayItems.length === 0 ? (
+                  <div className="flex-1 flex flex-col items-center justify-center py-10 text-center px-6">
+                    <CalendarClock className="w-10 h-10 text-gray-200 mb-3" />
+                    <p className="text-sm font-medium text-gray-500">Niciun job programat azi</p>
+                    <p className="text-xs text-gray-400 mt-1">Job-urile acceptate cu data de azi vor apărea aici</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-50 overflow-y-auto">
+                    {todayItems.map((item) => {
+                      const isInProgress = item.status === 'in_progress'
+                      const isStarting   = startingJobId === item.id
+                      const isTask       = item._type === 'task'
+                      const statusCfg    = isInProgress
+                        ? { label: 'În Progres', cls: 'bg-purple-100 text-purple-700' }
+                        : item.status === 'accepted'
+                        ? { label: 'Acceptat', cls: 'bg-yellow-100 text-yellow-700' }
+                        : { label: 'Asignat', cls: 'bg-blue-100 text-blue-700' }
+
+                      return (
+                        <div key={item.id} className="p-4 hover:bg-gray-50 transition">
+                          <div className="flex items-start gap-3">
+                            {/* Time column */}
+                            <div className="flex-shrink-0 text-center w-14">
+                              <p className="text-sm font-black text-gray-800">{item.time !== '—' ? item.time.slice(0, 5) : '—'}</p>
+                              <Clock className="w-3 h-3 text-gray-300 mx-auto mt-0.5" />
+                            </div>
+
+                            {/* Border */}
+                            <div className={`w-0.5 self-stretch rounded-full flex-shrink-0 ${isInProgress ? 'bg-purple-400' : 'bg-gray-200'}`} />
+
+                            {/* Content */}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-start justify-between gap-2 mb-1">
+                                <h4 className="font-bold text-gray-800 text-sm truncate">{item.title}</h4>
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold flex-shrink-0 ${statusCfg.cls}`}>
+                                  {statusCfg.label}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-xs text-gray-400 mb-3">
+                                <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${isTask ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'}`}>
+                                  {isTask ? 'Task' : 'Rezervare'}
+                                </span>
+                                <span>{item.client}</span>
+                              </div>
+
+                              {/* Action buttons */}
+                              <div className="flex gap-2">
+                                {!isInProgress && (
+                                  <button
+                                    onClick={() => handleStartJob(item)}
+                                    disabled={isStarting}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-semibold hover:bg-green-700 transition disabled:opacity-60"
+                                  >
+                                    {isStarting
+                                      ? <Loader2 className="w-3 h-3 animate-spin" />
+                                      : <Play className="w-3 h-3 fill-white" />
+                                    }
+                                    Începe job
+                                  </button>
+                                )}
+                                {isInProgress && (
+                                  <span className="flex items-center gap-1 px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg text-xs font-semibold">
+                                    <CheckCircle2 className="w-3 h-3" /> În desfășurare
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => isTask ? setSelectedTaskId(item.id) : null}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-100 transition"
+                                >
+                                  <CalendarClock className="w-3 h-3" />
+                                  Reprogramează
+                                </button>
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                        <p className="text-xs text-gray-500 mt-0.5">{item.client}</p>
-                        <p className="text-xs text-gray-400">{item.duration}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 
