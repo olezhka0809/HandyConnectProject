@@ -18,18 +18,38 @@ export default function HandymanNavbar() {
   const navigate = useNavigate()
   const [profile, setProfile] = useState(null)
   const [showNotifications, setShowNotifications] = useState(false)
+  const [unreadCount, setUnreadCount] = useState(0)
 
   const isActive = (path) => location.pathname === path
 
   useEffect(() => {
+    let channel
     async function loadProfile() {
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
         const { data } = await supabase.from('profiles').select('first_name, last_name, avatar_url').eq('id', user.id).single()
         setProfile(data)
+
+        const { count } = await supabase
+          .from('notifications')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+          .eq('is_read', false)
+        setUnreadCount(count ?? 0)
+
+        channel = supabase
+          .channel('handyman-navbar-notif')
+          .on('postgres_changes', {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'notifications',
+            filter: `user_id=eq.${user.id}`,
+          }, () => setUnreadCount(prev => prev + 1))
+          .subscribe()
       }
     }
     loadProfile()
+    return () => { if (channel) supabase.removeChannel(channel) }
   }, [])
 
   const initials = profile
@@ -70,10 +90,14 @@ export default function HandymanNavbar() {
               <MessageSquare className="w-5 h-5" />
             </button>
             <button 
-              onClick={() => setShowNotifications(true)}
+              onClick={() => { setShowNotifications(true); setUnreadCount(0) }}
               className="relative w-10 h-10 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 hover:text-blue-600 transition">
               <Bell className="w-5 h-5" />
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-white text-[10px] flex items-center justify-center font-bold">5</span>
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-white text-[10px] flex items-center justify-center font-bold">
+                  {unreadCount > 9 ? '9+' : unreadCount}
+                </span>
+              )}
             </button>
             <button
               onClick={handleLogout}

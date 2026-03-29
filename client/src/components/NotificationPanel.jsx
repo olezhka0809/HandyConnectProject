@@ -1,5 +1,18 @@
 import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { X, Calendar, CheckCheck, Bell, MessageSquare, XCircle, Star, CreditCard, Clock, AlertTriangle } from 'lucide-react'
+import { supabase } from '../supabase'
+
+const redirectMap = {
+  new_offer:         '/dashboard?tab=offers',
+  offer_counter:     '/handyman/jobs?tab=negotiations',
+  task_accepted:     '/handyman/jobs?tab=negotiations',
+  cancellation:      '/handyman/jobs?tab=negotiations',
+  service_completed: '/dashboard?tab=tasks',
+  new_review:        '/handyman/reviews',
+  booking_confirmed: '/dashboard?tab=bookings',
+  feedback_request:  '/dashboard?tab=tasks',
+}
 
 const iconMap = {
   booking_confirmed: { icon: CheckCheck, color: 'text-green-500', bg: 'bg-green-100' },
@@ -10,86 +23,11 @@ const iconMap = {
   cancellation: { icon: XCircle, color: 'text-red-500', bg: 'bg-red-100' },
   feedback_request: { icon: Star, color: 'text-red-500', bg: 'bg-red-100' },
   payment_processed: { icon: CreditCard, color: 'text-blue-600', bg: 'bg-blue-100' },
-  new_offer: { icon: AlertTriangle, color: 'text-yellow-500', bg: 'bg-yellow-100' },
+  new_offer:     { icon: AlertTriangle, color: 'text-yellow-500', bg: 'bg-yellow-100' },
+  offer_counter: { icon: AlertTriangle, color: 'text-orange-500', bg: 'bg-orange-100' },
   task_accepted: { icon: CheckCheck, color: 'text-green-500', bg: 'bg-green-100' },
   new_task: { icon: Bell, color: 'text-blue-500', bg: 'bg-blue-100' },
 }
-
-// Mock notifications - ulterior le înlocuiești cu date din Supabase
-const mockNotifications = [
-  {
-    id: 1,
-    type: 'booking_confirmed',
-    title: 'Rezervare Confirmată',
-    message: 'Programarea ta cu handymanul este confirmată pentru mâine la ora 10:00.',
-    date: '2026-03-03',
-    time: 'Acum 5 min',
-    is_read: false,
-  },
-  {
-    id: 2,
-    type: 'booking_reminder',
-    title: 'Reminder: Rezervare Apropiată',
-    message: 'Nu uita de vizita handymanului joi la ora 14:00.',
-    date: '2026-03-03',
-    time: 'Acum 10 min',
-    is_read: false,
-  },
-  {
-    id: 3,
-    type: 'booking_rescheduled',
-    title: 'Notificare: Rezervare Reprogramată',
-    message: 'Vizita handymanului a fost mutată pentru săptămâna viitoare.',
-    date: '2026-03-02',
-    time: 'Acum 15 min',
-    is_read: true,
-  },
-  {
-    id: 4,
-    type: 'service_completed',
-    title: 'Serviciu Finalizat',
-    message: 'Handymanul tău a finalizat reparațiile cu succes.',
-    date: '2026-03-02',
-    time: 'Acum 20 min',
-    is_read: true,
-  },
-  {
-    id: 5,
-    type: 'new_message',
-    title: 'Mesaj Nou de la Handyman',
-    message: 'Handymanul tău a ajuns la adresa stabilită.',
-    date: '2026-03-01',
-    time: 'Acum 25 min',
-    is_read: true,
-  },
-  {
-    id: 6,
-    type: 'cancellation',
-    title: 'Notificare Anulare',
-    message: 'Programarea ta cu handymanul a fost anulată la cererea ta.',
-    date: '2026-03-01',
-    time: 'Acum 30 min',
-    is_read: true,
-  },
-  {
-    id: 7,
-    type: 'feedback_request',
-    title: 'Feedback Solicitat',
-    message: 'Te rugăm să evaluezi experiența ta cu serviciul de handyman.',
-    date: '2026-03-01',
-    time: 'Acum 35 min',
-    is_read: true,
-  },
-  {
-    id: 8,
-    type: 'payment_processed',
-    title: 'Plată Procesată',
-    message: 'Plata ta a fost procesată cu succes. Mulțumim!',
-    date: '2026-03-01',
-    time: 'Tocmai acum',
-    is_read: true,
-  },
-]
 
 const formatDateLabel = (dateStr) => {
   const date = new Date(dateStr)
@@ -103,10 +41,45 @@ const formatDateLabel = (dateStr) => {
 }
 
 export default function NotificationPanel({ isOpen, onClose }) {
-  const [notifications, setNotifications] = useState(mockNotifications)
+  const [notifications, setNotifications] = useState([])
   const panelRef = useRef(null)
+  const navigate = useNavigate()
 
   const unreadCount = notifications.filter(n => !n.is_read).length
+
+  // Fetch notificari + realtime
+  useEffect(() => {
+    let channel
+
+    const load = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) return
+
+      const { data } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(50)
+
+      if (data) setNotifications(data)
+
+      channel = supabase
+        .channel('notifications-realtime')
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${user.id}`
+        }, (payload) => {
+          setNotifications(prev => [payload.new, ...prev])
+        })
+        .subscribe()
+    }
+
+    load()
+    return () => { if (channel) supabase.removeChannel(channel) }
+  }, [])
 
   // Închide la click în afara panelului
   useEffect(() => {
@@ -119,23 +92,36 @@ export default function NotificationPanel({ isOpen, onClose }) {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [isOpen, onClose])
 
-  const markAsRead = (id) => {
+  const markAsRead = async (id) => {
     setNotifications(prev =>
       prev.map(n => n.id === id ? { ...n, is_read: true } : n)
     )
+    await supabase.from('notifications').update({ is_read: true }).eq('id', id)
   }
 
-  const markAllAsRead = () => {
+  const markAllAsRead = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
     setNotifications(prev => prev.map(n => ({ ...n, is_read: true })))
+    await supabase.from('notifications').update({ is_read: true }).eq('user_id', user.id)
   }
 
-  const clearAll = () => {
+  const clearAll = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
     setNotifications([])
+    await supabase.from('notifications').delete().eq('user_id', user.id)
+  }
+
+  const formatTime = (createdAt) => {
+    const diff = Math.floor((Date.now() - new Date(createdAt)) / 1000)
+    if (diff < 60) return 'Tocmai acum'
+    if (diff < 3600) return `Acum ${Math.floor(diff / 60)} min`
+    if (diff < 86400) return `Acum ${Math.floor(diff / 3600)} h`
+    return `Acum ${Math.floor(diff / 86400)} zile`
   }
 
   // Grupează pe zile
   const grouped = notifications.reduce((acc, notif) => {
-    const label = formatDateLabel(notif.date)
+    const label = formatDateLabel(notif.created_at)
     if (!acc[label]) acc[label] = []
     acc[label].push(notif)
     return acc
@@ -201,7 +187,16 @@ export default function NotificationPanel({ isOpen, onClose }) {
                   return (
                     <div
                       key={notif.id}
-                      onClick={() => markAsRead(notif.id)}
+                      onClick={() => {
+                        markAsRead(notif.id)
+                        const rawPath = notif.data?.redirect || redirectMap[notif.type]
+                        if (rawPath) {
+                          onClose()
+                          const [path, query] = rawPath.split('?')
+                          const tab = query?.split('tab=')?.[1]
+                          navigate(path, { state: { tab } })
+                        }
+                      }}
                       className={`flex items-start gap-3 px-6 py-4 border-b border-gray-50 cursor-pointer transition-all hover:bg-gray-50
                         ${!notif.is_read ? 'bg-blue-50/50 border-l-4 border-l-blue-500' : ''}
                       `}
@@ -213,9 +208,9 @@ export default function NotificationPanel({ isOpen, onClose }) {
                         <p className={`text-sm ${!notif.is_read ? 'font-bold text-gray-800' : 'font-medium text-gray-700'}`}>
                           {notif.title}
                         </p>
-                        <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{notif.message}</p>
+                        <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{notif.body}</p>
                       </div>
-                      <span className="text-xs text-gray-400 flex-shrink-0 whitespace-nowrap">{notif.time}</span>
+                      <span className="text-xs text-gray-400 flex-shrink-0 whitespace-nowrap">{formatTime(notif.created_at)}</span>
                     </div>
                   )
                 })}
