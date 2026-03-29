@@ -66,8 +66,7 @@ export default function HandymanReviews() {
         supabase.from('reviews')
           .select(`
             id, rating, title, description, created_at,
-            helpful_count, owner_reply, owner_reply_at,
-            client_reply, client_reply_at, tags, photos,
+            helpful_count, owner_reply, owner_reply_at, tags, photos,
             reviewer:reviewer_id(id, first_name, last_name, avatar_url),
             task:task_id(title, categories(name))
           `)
