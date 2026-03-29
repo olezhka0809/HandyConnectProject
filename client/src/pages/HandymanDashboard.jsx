@@ -533,7 +533,7 @@ export default function HandymanDashboard() {
                     })}
                   </div>
                 )}
-              </div>
+               </div>
             </div>
 
             {/* Performance Cards */}

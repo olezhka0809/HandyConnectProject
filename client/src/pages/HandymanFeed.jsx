@@ -403,6 +403,15 @@ export default function HandymanFeed() {
     if (error) {
       alert('Eroare: ' + error.message)
     } else {
+      const handymanName = `${handymanProfile?.first_name || ''} ${handymanProfile?.last_name || ''}`.trim() || 'Un meșteșugar'
+      await supabase.from('notifications').insert({
+        user_id: selectedTask.client_id,
+        type: 'new_offer',
+        title: 'Ofertă nouă primită',
+        body: `${handymanName} a trimis o ofertă de ${offerForm.proposed_price} RON pentru „${selectedTask.title}"`,
+        data: { task_id: selectedTask.id, handyman_id: user.id, redirect: '/dashboard' },
+      })
+
       setTasks(prev => prev.map(t =>
         t.id === selectedTask.id
           ? { ...t, my_offer_status: 'pending', offer_count: (t.offer_count || 0) + 1 }
