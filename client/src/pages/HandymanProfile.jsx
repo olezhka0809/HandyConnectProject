@@ -5,7 +5,7 @@ import DashboardNavbar from '../components/dashboard/DashboardNavbar'
 import {
   ChevronLeft, MapPin, Clock, Star, CheckCircle, Heart, Share2,
   Calendar, MessageSquare, Shield, Award, Briefcase,
-  Wrench, Globe, Loader2, Target, AlertCircle
+  Wrench, Globe, Loader2, Target, AlertCircle, Copy, X
 } from 'lucide-react'
 
 function StarRow({ rating, size = 'sm' }) {
@@ -24,6 +24,12 @@ export default function HandymanProfile() {
   const navigate  = useNavigate()
   const [activeTab,   setActiveTab]   = useState('servicii')
   const [isFavorite,  setIsFavorite]  = useState(false)
+  const [favLoading,  setFavLoading]  = useState(false)
+  const [currentUserId, setCurrentUserId] = useState(null)
+  const [favoriteId,  setFavoriteId]  = useState(null) // id row din favorite_handymen
+  const [shareModal,  setShareModal]  = useState(false)
+  const [copied,      setCopied]      = useState(false)
+  const [helpfulVoted, setHelpfulVoted] = useState(new Set()) // set of review ids voted in this session
   const [loading,     setLoading]     = useState(true)
   const [notFound,    setNotFound]    = useState(false)
 
@@ -38,20 +44,22 @@ export default function HandymanProfile() {
     async function load() {
       setLoading(true)
 
+      // 0. current user
+      const { data: { user } } = await supabase.auth.getUser()
+      setCurrentUserId(user?.id ?? null)
+
       // 1. get all profiles to find one matching the slug
-      // slug = firstName-lastName normalized
-      const { data: allProfiles } = await supabase
-        .from('profiles')
-        .select('id, first_name, last_name, avatar_url, phone, email')
-
-      if (!allProfiles?.length) { setNotFound(true); setLoading(false); return }
-
-      // find matching slug
       function slugify(f, l) {
         return `${f}-${l}`.toLowerCase()
           .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
           .replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'')
       }
+
+      const { data: allProfiles } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name, avatar_url, phone, email')
+
+      if (!allProfiles?.length) { setNotFound(true); setLoading(false); return }
 
       const matched = allProfiles.find(p =>
         slugify(p.first_name ?? '', p.last_name ?? '') === slug
@@ -79,27 +87,65 @@ export default function HandymanProfile() {
         .order('created_at', { ascending: false })
       setServices(svcs ?? [])
 
-      // 4. reviews via bookings
-      const { data: bIds } = await supabase
-        .from('bookings')
-        .select('id')
-        .eq('handyman_id', matched.id)
+      // 4. reviews direct prin reviewed_id
+      const { data: revData } = await supabase
+        .from('reviews')
+        .select('id, rating, title, description, created_at, owner_reply, owner_reply_at, reviewer:reviewer_id(first_name, last_name, avatar_url)')
+        .eq('reviewed_id', matched.id)
+        .order('created_at', { ascending: false })
+        .limit(50)
+      setReviews(revData ?? [])
 
-      let revs = []
-      if (bIds?.length) {
-        const { data } = await supabase
-          .from('reviews')
-          .select('id,rating,title,description,created_at,reviewer:reviewer_id(first_name,last_name,avatar_url)')
-          .in('booking_id', bIds.map(b=>b.id))
-          .order('created_at', { ascending: false })
-          .limit(20)
-        revs = data ?? []
+      // 5. favorit status
+      if (user?.id) {
+        const { data: favRow } = await supabase
+          .from('favorite_handymen')
+          .select('id')
+          .eq('client_id', user.id)
+          .eq('handyman_id', matched.id)
+          .maybeSingle()
+        if (favRow) { setIsFavorite(true); setFavoriteId(favRow.id) }
       }
-      setReviews(revs)
+
       setLoading(false)
     }
     load()
   }, [slug])
+
+  // ── toggle favorite ───────────────────────────────────────────────────────
+  const toggleFavorite = async () => {
+    if (!currentUserId || !profile?.id || favLoading) return
+    setFavLoading(true)
+    if (isFavorite && favoriteId) {
+      await supabase.from('favorite_handymen').delete().eq('id', favoriteId)
+      setIsFavorite(false)
+      setFavoriteId(null)
+    } else {
+      const { data } = await supabase.from('favorite_handymen')
+        .insert({ client_id: currentUserId, handyman_id: profile.id })
+        .select('id').single()
+      setIsFavorite(true)
+      setFavoriteId(data?.id ?? null)
+    }
+    setFavLoading(false)
+  }
+
+  // ── helpful count ─────────────────────────────────────────────────────────
+  const toggleHelpful = async (rev) => {
+    if (helpfulVoted.has(rev.id)) return // already voted this session
+    const newCount = (rev.helpful_count ?? 0) + 1
+    await supabase.from('reviews').update({ helpful_count: newCount }).eq('id', rev.id)
+    setReviews(prev => prev.map(r => r.id === rev.id ? { ...r, helpful_count: newCount } : r))
+    setHelpfulVoted(prev => new Set([...prev, rev.id]))
+  }
+
+  // ── share ─────────────────────────────────────────────────────────────────
+  const shareUrl = typeof window !== 'undefined' ? window.location.href : ''
+  const handleCopy = () => {
+    navigator.clipboard.writeText(shareUrl)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
 
   // ── derived ───────────────────────────────────────────────────────────────
   const firstName = profile?.first_name ?? ''
@@ -181,11 +227,12 @@ export default function HandymanProfile() {
                     }
                   </div>
                   <div className="flex items-center gap-2 mb-1">
-                    <button onClick={()=>setIsFavorite(f=>!f)}
+                    <button onClick={toggleFavorite} disabled={favLoading}
                       className={`w-9 h-9 rounded-xl border flex items-center justify-center transition ${isFavorite?'bg-red-50 border-red-200 text-red-500':'border-gray-200 text-gray-400 hover:text-red-400'}`}>
                       <Heart className={`w-4 h-4 ${isFavorite?'fill-red-500':''}`}/>
                     </button>
-                    <button className="w-9 h-9 rounded-xl border border-gray-200 text-gray-400 hover:text-blue-600 flex items-center justify-center transition">
+                    <button onClick={()=>setShareModal(true)}
+                      className="w-9 h-9 rounded-xl border border-gray-200 text-gray-400 hover:text-blue-600 flex items-center justify-center transition">
                       <Share2 className="w-4 h-4"/>
                     </button>
                   </div>
@@ -363,20 +410,38 @@ export default function HandymanProfile() {
                       : <div className="space-y-4">
                           {reviews.map(rev=>{
                             const rName=rev.reviewer?`${rev.reviewer.first_name??''} ${rev.reviewer.last_name??''}`.trim()||'Anonim':'Anonim'
+                            const rInitials=rName.split(' ').slice(0,2).map(n=>n[0]).join('')
                             const rDate=rev.created_at?new Date(rev.created_at).toLocaleDateString('ro-RO',{day:'2-digit',month:'short',year:'numeric'}):''
                             return (
                               <div key={rev.id} className="border border-gray-100 rounded-xl p-4">
                                 <div className="flex items-center gap-2 mb-2">
-                                  <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold">
-                                    {rName.split(' ').slice(0,2).map(n=>n[0]).join('')}
-                                  </div>
-                                  <div>
+                                  {rev.reviewer?.avatar_url
+                                    ? <img src={rev.reviewer.avatar_url} alt="" className="w-9 h-9 rounded-full object-cover flex-shrink-0"/>
+                                    : <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold flex-shrink-0">{rInitials}</div>
+                                  }
+                                  <div className="flex-1">
                                     <p className="text-sm font-semibold text-gray-800">{rName}</p>
                                     <div className="flex items-center gap-1.5"><StarRow rating={rev.rating}/><span className="text-xs text-gray-400">{rDate}</span></div>
                                   </div>
                                 </div>
-                                {rev.title&&<p className="text-xs font-bold text-gray-700 mb-1">{rev.title}</p>}
-                                {rev.description&&<p className="text-xs text-gray-500 leading-relaxed">{rev.description}</p>}
+                                {rev.title&&<p className="text-sm font-bold text-gray-700 mb-1">{rev.title}</p>}
+                                {rev.description&&<p className="text-sm text-gray-600 leading-relaxed">{rev.description}</p>}
+                                {rev.owner_reply&&(
+                                  <div className="mt-3 pl-3 border-l-2 border-blue-200 bg-blue-50 rounded-r-lg p-2.5">
+                                    <p className="text-xs font-bold text-blue-700 mb-0.5">Răspuns {fullName}:</p>
+                                    <p className="text-xs text-blue-600 leading-relaxed">{rev.owner_reply}</p>
+                                  </div>
+                                )}
+                                <div className="flex justify-end mt-2">
+                                  <button onClick={()=>toggleHelpful(rev)}
+                                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition
+                                      ${helpfulVoted.has(rev.id)
+                                        ? 'bg-red-50 text-red-500 cursor-default'
+                                        : 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500'}`}>
+                                    <Heart className={`w-3.5 h-3.5 ${helpfulVoted.has(rev.id)?'fill-red-500 text-red-500':''}`}/>
+                                    {rev.helpful_count > 0 ? rev.helpful_count : 0}
+                                  </button>
+                                </div>
                               </div>
                             )
                           })}
@@ -509,6 +574,74 @@ export default function HandymanProfile() {
 
         </div>
       </div>
+
+      {/* ── Share Modal ── */}
+      {shareModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center px-4"
+          onClick={()=>setShareModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6"
+            onClick={e=>e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="font-bold text-gray-800 text-lg">Distribuie profilul</h3>
+              <button onClick={()=>setShareModal(false)}
+                className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center hover:bg-gray-200 transition">
+                <X className="w-4 h-4 text-gray-500"/>
+              </button>
+            </div>
+
+            {/* Avatar + name preview */}
+            <div className="flex items-center gap-3 bg-gray-50 rounded-xl p-3 mb-5">
+              {avatarUrl
+                ? <img src={avatarUrl} alt="" className="w-10 h-10 rounded-full object-cover"/>
+                : <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-sm">{initStr}</div>
+              }
+              <div>
+                <p className="font-semibold text-gray-800 text-sm">{fullName}</p>
+                <p className="text-xs text-gray-400">Handyman · HandyConnect</p>
+              </div>
+            </div>
+
+            {/* Copy link */}
+            <div className="flex items-center gap-2 mb-5">
+              <div className="flex-1 bg-gray-100 rounded-xl px-3 py-2 text-xs text-gray-500 truncate">{shareUrl}</div>
+              <button onClick={handleCopy}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition ${copied?'bg-green-100 text-green-700':'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                <Copy className="w-3.5 h-3.5"/>
+                {copied ? 'Copiat!' : 'Copiază'}
+              </button>
+            </div>
+
+            {/* Social buttons */}
+            <p className="text-xs text-gray-400 mb-3 font-medium uppercase tracking-wide">Distribuie pe</p>
+            <div className="grid grid-cols-3 gap-3">
+              <a href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}`}
+                target="_blank" rel="noopener noreferrer"
+                className="flex flex-col items-center gap-1.5 p-3 bg-blue-50 rounded-xl hover:bg-blue-100 transition">
+                <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
+                  <span className="text-white font-black text-sm">f</span>
+                </div>
+                <span className="text-xs text-blue-700 font-medium">Facebook</span>
+              </a>
+              <a href={`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(`Profil ${fullName} pe HandyConnect`)}`}
+                target="_blank" rel="noopener noreferrer"
+                className="flex flex-col items-center gap-1.5 p-3 bg-sky-50 rounded-xl hover:bg-sky-100 transition">
+                <div className="w-8 h-8 bg-sky-500 rounded-full flex items-center justify-center">
+                  <span className="text-white font-black text-xs">𝕏</span>
+                </div>
+                <span className="text-xs text-sky-700 font-medium">Twitter/X</span>
+              </a>
+              <a href={`https://wa.me/?text=${encodeURIComponent(`${fullName} pe HandyConnect: ${shareUrl}`)}`}
+                target="_blank" rel="noopener noreferrer"
+                className="flex flex-col items-center gap-1.5 p-3 bg-green-50 rounded-xl hover:bg-green-100 transition">
+                <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
+                  <span className="text-white text-xs font-black">W</span>
+                </div>
+                <span className="text-xs text-green-700 font-medium">WhatsApp</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
