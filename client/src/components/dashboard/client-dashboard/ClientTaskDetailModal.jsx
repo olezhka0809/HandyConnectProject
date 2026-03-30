@@ -523,6 +523,15 @@ function CompletionApprovalSection({ completion, taskId, taskTitle, handymanId, 
           created_at:   now,
         })
         if (reviewErr) throw reviewErr
+
+        const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating)
+        await supabase.from('notifications').insert({
+          user_id: handymanId,
+          type: 'new_review',
+          title: 'Recenzie nouă primită',
+          body: `Ai primit o recenzie de ${stars} pentru „${taskTitle || 'un job finalizat'}"`,
+          data: { task_id: taskId, rating },
+        })
       }
 
       setLocalData(prev => ({ ...prev, client_accepted: true, client_rating: rating, client_review: reviewText || null }))
