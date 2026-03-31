@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Link, useLocation as useRouterLocation } from 'react-router-dom'
 import { supabase } from '../supabase'
 import DashboardNavbar from '../components/dashboard/DashboardNavbar'
 import useLocation from '../hooks/useLocation'
 import LocationBanner from '../components/LocationBanner'
 import ClientTaskDetailModal from '../components/dashboard/client-dashboard/ClientTaskDetailModal'
 import ClientRescheduleModal from '../components/dashboard/client-dashboard/ClientRescheduleModal'
+import ClientBookingDetailModal from '../components/dashboard/client-dashboard/ClientBookingDetailModal'
 import {
   Plus, Calendar, CheckCircle, Clock, DollarSign,
   Star, MessageSquare, Heart, Briefcase, Search, Bell,
@@ -96,6 +97,15 @@ function RescheduleCard({ req, jobTitle, onUpdated }) {
         scheduled_time: req.proposed_time,
         updated_at: new Date().toISOString(),
       }).eq('id', req.job_id)
+      if (req.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: req.handyman_id,
+          type: 'task_accepted',
+          title: 'Reprogramare acceptată!',
+          body: `Clientul a acceptat reprogramarea pentru ${fmtLong(req.proposed_date)} la ${req.proposed_time}.`,
+          data: { job_id: req.job_id, job_type: req.job_type, redirect: '/handyman/jobs' },
+        })
+      }
       onUpdated?.()
     } catch (e) { setError('Eroare: ' + (e.message ?? '')) }
     finally { setSaving(false) }
@@ -107,6 +117,15 @@ function RescheduleCard({ req, jobTitle, onUpdated }) {
       await supabase.from('reschedule_requests')
         .update({ status: 'rejected', responded_at: new Date().toISOString() })
         .eq('id', req.id)
+      if (req.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: req.handyman_id,
+          type: 'new_offer',
+          title: 'Reprogramare refuzată',
+          body: `Clientul a refuzat reprogramarea propusă pentru ${fmtLong(req.proposed_date)}.`,
+          data: { job_id: req.job_id, job_type: req.job_type, redirect: '/handyman/jobs' },
+        })
+      }
       onUpdated?.()
     } catch (e) { setError('Eroare: ' + (e.message ?? '')) }
     finally { setSaving(false) }
@@ -127,6 +146,15 @@ function RescheduleCard({ req, jobTitle, onUpdated }) {
         status: 'pending_handyman',
         created_at: new Date().toISOString(),
       })
+      if (req.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: req.handyman_id,
+          type: 'new_offer',
+          title: 'Contra-propunere de reprogramare',
+          body: `Clientul propune o dată alternativă: ${counterDate} la ${counterTime}.`,
+          data: { job_id: req.job_id, job_type: req.job_type, redirect: '/handyman/jobs' },
+        })
+      }
       onUpdated?.()
     } catch (e) { setError('Eroare: ' + (e.message ?? '')) }
     finally { setSaving(false) }
@@ -272,9 +300,15 @@ export default function ClientDashboard() {
   const [tasks,         setTasks]           = useState([])
   const [favorites,     setFavorites]       = useState([])
   const [recentActivity,setRecentActivity]  = useState([])
-  const [tab,           setTab]             = useState('overview')
+  const routerLocation = useRouterLocation()
+  const [tab,           setTab]             = useState(routerLocation.state?.tab || 'overview')
   const [loading,       setLoading]         = useState(true)
-  const [detailTaskId,  setDetailTaskId]    = useState(null)
+
+  useEffect(() => {
+    if (routerLocation.state?.tab) setTab(routerLocation.state.tab)
+  }, [routerLocation.state])
+  const [detailTaskId,    setDetailTaskId]    = useState(null)
+  const [detailBookingId, setDetailBookingId] = useState(null)
 
   // Task tab filters
   const [taskStatusFilter, setTaskStatusFilter] = useState('all')
@@ -306,7 +340,7 @@ export default function ClientDashboard() {
     ] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).single(),
       supabase.from('client_dashboard_stats').select('*').eq('client_id', user.id).single(),
-      supabase.from('bookings').select('*, handyman:handyman_id(first_name,last_name,avatar_url), service:service_id(title,base_price)')
+      supabase.from('bookings').select('*, handyman:handyman_id(first_name,last_name,avatar_url), service:service_id(title,base_price,categories(name))')
         .eq('client_id', user.id).order('created_at', { ascending: false }).limit(20),
       supabase.from('tasks').select('*, handyman:handyman_id(first_name,last_name,avatar_url), category:category_id(name)')
         .eq('client_id', user.id).eq('is_archived', false).order('created_at', { ascending: false }).limit(20),
@@ -351,7 +385,7 @@ export default function ClientDashboard() {
     const tks = tasksRes.data ?? []
     const activity = [
       ...bks.slice(0,3).map(b => ({ type:'booking', title:b.service?.title||'Rezervare', status:b.status, date:b.created_at, handyman:b.handyman?`${b.handyman.first_name} ${b.handyman.last_name}`:null, total:b.total })),
-      ...tks.slice(0,3).map(t => ({ type:'task',    title:t.title,                       status:t.status, date:t.created_at, handyman:t.handyman?`${t.handyman.first_name} ${t.handyman.last_name}`:null, category:t.category?.name })),
+      ...tks.slice(0,3).map(t => ({ type:'task',    title:t.title,                       status:t.status, date:t.created_at, handyman:t.handyman?`${t.handyman.first_name} ${t.handyman.last_name}`:null, category:t.category?.name, price:t.final_price })),
     ].sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0,5)
     setRecentActivity(activity)
 
@@ -399,6 +433,8 @@ export default function ClientDashboard() {
         handyman_id: neg.handyman_id,
         status: 'assigned',
         final_price: neg.proposed_price,
+        scheduled_date: neg.available_date ?? null,
+        scheduled_time: neg.available_time ?? null,
         updated_at: new Date().toISOString(),
       }).eq('id', neg.task_id)
       // Show success modal before reloading
@@ -407,6 +443,15 @@ export default function ClientDashboard() {
         : 'Handyman'
       const taskTitle = tasks.find(t => t.id === neg.task_id)?.title ?? 'Task'
       setAcceptedOffer({ handymanName, price: neg.proposed_price, taskTitle })
+
+      await supabase.from('notifications').insert({
+        user_id: neg.handyman_id,
+        type: 'task_accepted',
+        title: 'Oferta ta a fost acceptată!',
+        body: `Clientul a acceptat oferta ta de ${neg.proposed_price} RON pentru „${taskTitle}"`,
+        data: { task_id: neg.task_id },
+      })
+
       await loadDashboardData()
     } finally { setNegLoading(false) }
   }
@@ -414,21 +459,42 @@ export default function ClientDashboard() {
   const handleRejectOffer = async (neg) => {
     await supabase.from('task_offers').update({ status: 'rejected' }).eq('id', neg.id)
     setNegotiations(prev => prev.filter(n => n.id !== neg.id))
+
+    const taskTitle = tasks.find(t => t.id === neg.task_id)?.title ?? 'Task'
+    await supabase.from('notifications').insert({
+      user_id: neg.handyman_id,
+      type: 'cancellation',
+      title: 'Oferta ta a fost refuzată',
+      body: `Clientul a refuzat oferta ta pentru „${taskTitle}"`,
+      data: { task_id: neg.task_id },
+    })
   }
 
-  const handleCounterOffer = async (neg, counterPrice, msg) => {
+  const handleCounterOffer = async (neg, counterPrice, msg, date, time) => {
     // Mark current handyman offer as negotiating
     await supabase.from('task_offers').update({ status: 'negotiating' }).eq('id', neg.id)
     // Insert client's counter-offer with sent_by: 'client'
+    // Inherit estimated_duration, available_date, available_time from original offer if not changed
     await supabase.from('task_offers').insert({
-      task_id:           neg.task_id,
-      handyman_id:       neg.handyman_id,
-      proposed_price:    Number(counterPrice),
-      message:           msg || null,
-      status:            'pending',
-      sent_by:           'client',
-      created_at:        new Date().toISOString(),
-      updated_at:        new Date().toISOString(),
+      task_id:            neg.task_id,
+      handyman_id:        neg.handyman_id,
+      proposed_price:     Number(counterPrice),
+      message:            msg || null,
+      status:             'pending',
+      sent_by:            'client',
+      estimated_duration: neg.estimated_duration || null,
+      available_date:     date || neg.available_date || null,
+      available_time:     time || neg.available_time || null,
+      created_at:         new Date().toISOString(),
+      updated_at:         new Date().toISOString(),
+    })
+    const taskTitle = tasks.find(t => t.id === neg.task_id)?.title ?? 'Task'
+    await supabase.from('notifications').insert({
+      user_id: neg.handyman_id,
+      type: 'offer_counter',
+      title: 'Contra-ofertă primită',
+      body: `Clientul a propus ${counterPrice} RON pentru „${taskTitle}"`,
+      data: { task_id: neg.task_id },
     })
     await loadDashboardData()
   }
@@ -455,6 +521,10 @@ export default function ClientDashboard() {
 
   const pendingRescheduleCount = rescheduleRequests.length
   const pendingOffersCount     = Object.keys(negsByJob).length
+
+  const totalSpent =
+    bookings.filter(b => b.status === 'completed').reduce((sum, b) => sum + (Number(b.total) || 0), 0) +
+    tasks.filter(t => t.status === 'completed').reduce((sum, t) => sum + (Number(t.final_price) || 0), 0)
 
   const taskCategoryOptions = [...new Set(tasks.map(t => t.category?.name).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ro'))
 
@@ -516,7 +586,7 @@ export default function ClientDashboard() {
           {[
             { label:'Rezervări Active', value:stats?.active_bookings||0,                                    Icon:Calendar,  color:'bg-blue-100 text-blue-600' },
             { label:'Finalizate',       value:(stats?.completed_bookings||0)+(stats?.completed_tasks||0),  Icon:CheckCircle,color:'bg-green-100 text-green-600' },
-            { label:'Total Cheltuit',   value:fmtPrice(stats?.total_spent),                                 Icon:DollarSign,color:'bg-purple-100 text-purple-600' },
+            { label:'Total Cheltuit',   value:fmtPrice(totalSpent),                                         Icon:DollarSign,color:'bg-purple-100 text-purple-600' },
             { label:'Favoriți',         value:stats?.favorite_count||0,                                     Icon:Heart,     color:'bg-red-100 text-red-600' },
           ].map(s => (
             <div key={s.label} className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
@@ -573,7 +643,7 @@ export default function ClientDashboard() {
                     {bookings.slice(0,4).map(b => {
                       const resched = getRescheduleForJob(b.id)
                       return (
-                        <div key={b.id} className="p-4 hover:bg-gray-50 transition">
+                        <div key={b.id} className="p-4 hover:bg-gray-50 transition cursor-pointer" onClick={() => setDetailBookingId(b.id)}>
                           <div className="flex items-center justify-between mb-1.5">
                             <div className="flex items-center gap-3">
                               <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold text-sm flex-shrink-0">
@@ -624,7 +694,12 @@ export default function ClientDashboard() {
                         <div key={t.id} className="p-4 hover:bg-gray-50 transition cursor-pointer" onClick={() => setDetailTaskId(t.id)}>
                           <div className="flex items-center justify-between mb-1">
                             <p className="font-medium text-gray-800 text-sm">{t.title}</p>
-                            <StatusBadge status={t.status}/>
+                            <div className="flex items-center gap-2">
+                              {t.final_price && !['open','pending'].includes(t.status) && (
+                                <span className="text-sm font-bold text-green-700">{fmtPrice(t.final_price)}</span>
+                              )}
+                              <StatusBadge status={t.status}/>
+                            </div>
                           </div>
                           <p className="text-xs text-gray-400 mb-2">{t.category?.name||'Necategorizat'} · {fmtDate(t.created_at)}</p>
                           <div className="flex flex-wrap gap-1.5">
@@ -672,7 +747,11 @@ export default function ClientDashboard() {
                         </div>
                         <p className="text-xs text-gray-400 mt-1">{fmtDate(item.date)}</p>
                       </div>
-                      {item.total && <span className="text-sm font-bold text-gray-800 flex-shrink-0">{fmtPrice(item.total)}</span>}
+                      {(() => {
+                        const priceVal = item.total ?? item.price
+                        const showPrice = priceVal && !['open','pending'].includes(item.status)
+                        return showPrice ? <span className="text-sm font-bold text-green-700 flex-shrink-0">{fmtPrice(priceVal)}</span> : null
+                      })()}
                     </div>
                   )) : (
                     <div className="text-center py-6"><Bell className="w-8 h-8 text-gray-300 mx-auto mb-2"/><p className="text-sm text-gray-500">Nicio activitate</p></div>
@@ -716,30 +795,79 @@ export default function ClientDashboard() {
               <div className="divide-y divide-gray-50">
                 {bookings.map(b => {
                   const resched = getRescheduleForJob(b.id)
+                  const isActionable = ['confirmed','assigned','in_progress'].includes(b.status)
+                  const handymanName = b.handyman ? `${b.handyman.first_name} ${b.handyman.last_name}` : null
+                  const bookingStatusInfo =
+                    b.status === 'completed'   ? `Lucrarea este finalizată${handymanName ? ` (${handymanName})` : ''}` :
+                    b.status === 'in_progress' ? `Handymanul a început lucrarea${handymanName ? ` (${handymanName})` : ''}` :
+                    b.status === 'assigned' || b.status === 'confirmed' ? `Rezervare alocată${handymanName ? ` către ${handymanName}` : ''}` :
+                    b.status === 'accepted'    ? `Rezervare acceptată${handymanName ? ` de ${handymanName}` : ''}` :
+                    b.status === 'cancelled'   ? 'Rezervare anulată' :
+                    'Rezervare în așteptarea confirmării'
+                  const statusInfoColor =
+                    b.status === 'completed'   ? 'text-green-600' :
+                    b.status === 'in_progress' ? 'text-purple-600' :
+                    b.status === 'assigned' || b.status === 'confirmed' ? 'text-blue-600' :
+                    b.status === 'accepted'    ? 'text-green-600' :
+                    b.status === 'cancelled'   ? 'text-red-500' : 'text-yellow-600'
                   return (
-                    <div key={b.id} className={`p-5 hover:bg-gray-50 transition ${resched ? 'border-l-4 border-red-400' : ''}`}>
+                    <div key={b.id} className={`p-5 hover:bg-gray-50 transition cursor-pointer ${resched ? 'border-l-4 border-orange-400' : ''}`}
+                      onClick={() => setDetailBookingId(b.id)}>
+                      {/* Row 1: title + price + status */}
                       <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold text-sm flex-shrink-0">
-                            {b.handyman?`${b.handyman.first_name?.[0]||''}${b.handyman.last_name?.[0]||''}`:'?'}
-                          </div>
-                          <div>
-                            <p className="font-medium text-gray-800">{b.service?.title||'Rezervare'}</p>
-                            <p className="text-sm text-gray-500">{b.handyman?`${b.handyman.first_name} ${b.handyman.last_name}`:'Nealocat'}</p>
-                          </div>
+                        <div>
+                          <p className="font-medium text-gray-800">{b.service?.title || 'Rezervare'}</p>
+                          <p className="text-sm text-gray-500">{b.service?.categories?.name || 'Serviciu'}</p>
                         </div>
-                        <div className="text-right">
+                        <div className="flex items-center gap-2">
+                          {b.total && !['pending'].includes(b.status) && (
+                            <span className="text-sm font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                              {fmtPrice(b.total)}
+                            </span>
+                          )}
                           <StatusBadge status={b.status}/>
-                          <p className="text-lg font-bold text-blue-600 mt-1">{fmtPrice(b.total)}</p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-4 text-xs text-gray-400 mt-2 flex-wrap">
-                        <div className="flex items-center gap-1"><Calendar className="w-3 h-3"/><span>Creat: {fmtDate(b.created_at)}</span></div>
-                        {b.scheduled_date && <div className="flex items-center gap-1"><Clock className="w-3 h-3"/><span>Programat: {fmtDate(b.scheduled_date)} {b.scheduled_time||''}</span></div>}
-                        {b.service_address && <div className="flex items-center gap-1"><MapPin className="w-3 h-3"/><span>{b.service_address}</span></div>}
+
+                      {/* Row 2: date + status info */}
+                      <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
+                        <div className="flex items-center gap-1"><Clock className="w-3 h-3"/><span>{fmtDate(b.created_at)}</span></div>
+                        <span className={`${statusInfoColor} font-medium`}>{bookingStatusInfo}</span>
                       </div>
+
+                      {/* Row 3: badges */}
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {b.scheduled_date && !['pending','cancelled'].includes(b.status) && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-green-50 border border-green-200 text-green-700 text-xs font-semibold">
+                            <Calendar className="w-3.5 h-3.5"/>
+                            Programat: {fmtDate(b.scheduled_date)}{b.scheduled_time ? ` la ${b.scheduled_time}` : ''}
+                          </div>
+                        )}
+                        {b.service_address && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 text-xs font-medium">
+                            <MapPin className="w-3.5 h-3.5"/>
+                            {b.service_address}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Row 4: action buttons */}
+                      {isActionable && (
+                        <div className="flex flex-wrap gap-2 mb-2">
+                          <button onClick={e => { e.stopPropagation(); setDetailBookingId(b.id) }}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100 transition">
+                            <CalendarClock className="w-3.5 h-3.5"/> Reprogramează
+                          </button>
+                          <button onClick={e => { e.stopPropagation(); setDetailBookingId(b.id) }}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 transition">
+                            <XCircle className="w-3.5 h-3.5"/> Anulează
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Reschedule request from handyman */}
                       {resched && (
-                        <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between">
+                        <div className="mt-1 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <CalendarClock className="w-4 h-4 text-red-600 flex-shrink-0"/>
                             <div>
@@ -748,7 +876,7 @@ export default function ClientDashboard() {
                               {resched.message && <p className="text-xs text-red-500 italic mt-0.5">"{resched.message}"</p>}
                             </div>
                           </div>
-                          <button onClick={() => setRescheduleModal({ request: resched, jobTitle: b.service?.title||'Rezervare' })}
+                          <button onClick={e => { e.stopPropagation(); setRescheduleModal({ request: resched, jobTitle: b.service?.title||'Rezervare' }) }}
                             className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700 transition flex-shrink-0">
                             Răspunde
                           </button>
@@ -879,7 +1007,14 @@ export default function ClientDashboard() {
                           <p className="font-medium text-gray-800">{t.title}</p>
                           <p className="text-sm text-gray-500">{t.category?.name||'Necategorizat'}</p>
                         </div>
-                        <StatusBadge status={t.status}/>
+                        <div className="flex items-center gap-2">
+                          {t.final_price && !['open','pending'].includes(t.status) && (
+                            <span className="text-sm font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                              {fmtPrice(t.final_price)}
+                            </span>
+                          )}
+                          <StatusBadge status={t.status}/>
+                        </div>
                       </div>
                       {t.description && <p className="text-sm text-gray-600 mb-2 line-clamp-2">{t.description}</p>}
                       <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
@@ -887,6 +1022,20 @@ export default function ClientDashboard() {
                         <span className={`${t.status === 'completed' ? 'text-green-600' : t.status === 'in_progress' ? 'text-purple-600' : t.status === 'assigned' ? 'text-blue-600' : 'text-yellow-600'} font-medium`}>
                           {statusInfo}
                         </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {t.status === 'assigned' && t.scheduled_date && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-green-50 border border-green-200 text-green-700 text-xs font-semibold">
+                            <Calendar className="w-3.5 h-3.5"/>
+                            Programat: {fmtDate(t.scheduled_date)}{t.scheduled_time ? ` la ${t.scheduled_time}` : ''}
+                          </div>
+                        )}
+                        {t.service_address && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 text-xs font-medium">
+                            <MapPin className="w-3.5 h-3.5"/>
+                            {t.service_address}
+                          </div>
+                        )}
                       </div>
 
                       {isAssignedTask && (
@@ -1010,7 +1159,7 @@ export default function ClientDashboard() {
                           loading={negLoading}
                           onAccept={() => handleAcceptOffer(neg)}
                           onReject={() => handleRejectOffer(neg)}
-                          onCounter={(price, msg) => handleCounterOffer(neg, price, msg)}
+                          onCounter={(price, msg, date, time) => handleCounterOffer(neg, price, msg, date, time)}
                         />
                       ))}
                     </div>
@@ -1068,15 +1217,25 @@ export default function ClientDashboard() {
                 {favorites.map(fav => {
                   const h = fav.handyman
                   const hp = h?.handyman_profiles?.[0]
+                  const favSlug = h?.first_name && h?.last_name
+                    ? `${h.first_name}-${h.last_name}`.toLowerCase()
+                        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                        .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+                    : null
                   return (
                     <div key={fav.id} className="border border-gray-100 rounded-xl p-4 hover:shadow-md transition">
                       <div className="flex items-center gap-3 mb-3">
-                        {h?.avatar_url
-                          ? <img src={h.avatar_url} alt="" className="w-12 h-12 rounded-full object-cover"/>
-                          : <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold">{h?.first_name?.[0]}{h?.last_name?.[0]}</div>
-                        }
+                        <button onClick={() => favSlug && navigate(`/handymen/${favSlug}`)} className="flex-shrink-0">
+                          {h?.avatar_url
+                            ? <img src={h.avatar_url} alt="" className="w-12 h-12 rounded-full object-cover hover:ring-2 hover:ring-blue-400 transition"/>
+                            : <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold hover:bg-blue-200 transition">{h?.first_name?.[0]}{h?.last_name?.[0]}</div>
+                          }
+                        </button>
                         <div className="flex-1">
-                          <p className="font-bold text-gray-800">{h?.first_name} {h?.last_name}</p>
+                          <button onClick={() => favSlug && navigate(`/handymen/${favSlug}`)}
+                            className="font-bold text-gray-800 hover:text-blue-600 transition text-left">
+                            {h?.first_name} {h?.last_name}
+                          </button>
                           {h?.city && <p className="text-xs text-gray-500 flex items-center gap-1"><MapPin className="w-3 h-3"/>{h.city}</p>}
                         </div>
                         <button onClick={() => removeFavorite(fav.handyman_id)} className="w-9 h-9 rounded-full bg-red-50 flex items-center justify-center hover:bg-red-100 transition">
@@ -1137,6 +1296,7 @@ export default function ClientDashboard() {
 
       {/* Modals */}
       <ClientTaskDetailModal taskId={detailTaskId} onClose={() => setDetailTaskId(null)} onUpdated={loadDashboardData}/>
+      <ClientBookingDetailModal bookingId={detailBookingId} onClose={() => setDetailBookingId(null)} onUpdated={loadDashboardData}/>
       {rescheduleModal && (
         <ClientRescheduleModal
           request={rescheduleModal.request}
@@ -1155,6 +1315,8 @@ function OfferRow({ neg, originalPrice, loading, onAccept, onReject, onCounter }
   const [showCounter,  setShowCounter]  = useState(false)
   const [counterPrice, setCounterPrice] = useState('')
   const [counterMsg,   setCounterMsg]   = useState('')
+  const [counterDate,  setCounterDate]  = useState(neg.available_date ?? '')
+  const [counterTime,  setCounterTime]  = useState(neg.available_time ?? '')
   const [handymanRounds, setHandymanRounds] = useState(0)
   const [clientRounds,   setClientRounds]   = useState(0)
 
@@ -1180,34 +1342,63 @@ function OfferRow({ neg, originalPrice, loading, onAccept, onReject, onCounter }
     ? Number(originalPrice) - Number(neg.proposed_price)
     : null
 
+  const navigate = useNavigate()
   const handymanName = neg.handyman
     ? `${neg.handyman.first_name ?? ''} ${neg.handyman.last_name ?? ''}`.trim() || 'Handyman'
     : `Handyman #${neg.handyman_id?.slice(0,8)}`
+  const initials = handymanName.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase()
+  const handymanSlug = neg.handyman?.first_name && neg.handyman?.last_name
+    ? `${neg.handyman.first_name}-${neg.handyman.last_name}`.toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+    : null
 
   return (
     <div className="p-5">
       {/* Handyman info + price */}
-      <div className="flex items-start justify-between mb-3">
-        <div>
-          <p className="text-sm font-semibold text-gray-800">{handymanName}</p>
-          {neg.handyman?.city && (
-            <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5"><MapPin className="w-3 h-3"/>{neg.handyman.city}</p>
-          )}
-          {neg.estimated_duration && (
-            <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5"><Clock className="w-3 h-3"/>{neg.estimated_duration}</p>
-          )}
-          {neg.available_date && (
-            <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
-              <Calendar className="w-3 h-3"/>
-              {new Date(neg.available_date).toLocaleDateString('ro-RO',{day:'2-digit',month:'short'})}
-              {neg.available_time ? ` · ${neg.available_time}` : ''}
-            </p>
-          )}
+      <div className="flex items-start gap-3 mb-4">
+        {/* Avatar */}
+        <button onClick={() => handymanSlug && navigate(`/handymen/${handymanSlug}`)}
+          className="flex-shrink-0 w-12 h-12 rounded-full overflow-hidden border-2 border-blue-100 hover:border-blue-400 transition">
+          {neg.handyman?.avatar_url
+            ? <img src={neg.handyman.avatar_url} alt={handymanName} className="w-full h-full object-cover"/>
+            : <div className="w-full h-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold">{initials}</div>
+          }
+        </button>
+
+        {/* Name + meta */}
+        <div className="flex-1 min-w-0">
+          <button onClick={() => handymanSlug && navigate(`/handymen/${handymanSlug}`)}
+            className="text-base font-bold text-gray-900 hover:text-blue-600 transition text-left">
+            {handymanName}
+          </button>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-0.5">
+            {neg.handyman?.city && (
+              <span className="text-xs text-gray-400 flex items-center gap-1"><MapPin className="w-3 h-3"/>{neg.handyman.city}</span>
+            )}
+            {neg.handyman?.average_rating > 0 && (
+              <span className="text-xs text-yellow-600 flex items-center gap-1 font-medium">★ {Number(neg.handyman.average_rating).toFixed(1)}</span>
+            )}
+            {neg.estimated_duration && (
+              <span className="text-xs text-gray-400 flex items-center gap-1"><Clock className="w-3 h-3"/>{neg.estimated_duration}</span>
+            )}
+          </div>
         </div>
-        <div className="text-right">
+
+        {/* Price + date */}
+        <div className="text-right flex-shrink-0">
           <p className="text-2xl font-black text-blue-700">{fmtPrice(neg.proposed_price)}</p>
           {savings > 0 && <p className="text-xs text-green-600 font-semibold">-{fmtPrice(savings)} față de buget</p>}
           {savings < 0 && <p className="text-xs text-red-500 font-semibold">+{fmtPrice(Math.abs(savings))} peste buget</p>}
+          {neg.available_date && (
+            <div className="flex items-center justify-end gap-1 mt-1.5 px-2 py-1 bg-blue-50 border border-blue-100 rounded-lg">
+              <Calendar className="w-3.5 h-3.5 text-blue-500 flex-shrink-0"/>
+              <span className="text-xs font-semibold text-blue-700 whitespace-nowrap">
+                {new Date(neg.available_date).toLocaleDateString('ro-RO',{weekday:'short', day:'2-digit', month:'short'})}
+                {neg.available_time ? ` · ${neg.available_time}` : ''}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1264,6 +1455,23 @@ function OfferRow({ neg, originalPrice, loading, onAccept, onReject, onCounter }
           <input type="number" value={counterPrice} onChange={e => setCounterPrice(e.target.value)}
             placeholder="Prețul tău (RON)"
             className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="text-[10px] text-gray-400 font-medium mb-0.5 block">Data propusă</label>
+              <input type="date" value={counterDate} onChange={e => setCounterDate(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+            </div>
+            <div className="flex-1">
+              <label className="text-[10px] text-gray-400 font-medium mb-0.5 block">Ora</label>
+              <select value={counterTime} onChange={e => setCounterTime(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">Selectează</option>
+                {['08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00'].map(h => (
+                  <option key={h} value={h}>{h}</option>
+                ))}
+              </select>
+            </div>
+          </div>
           <textarea value={counterMsg} onChange={e => setCounterMsg(e.target.value)} rows={2}
             placeholder="Mesaj opțional..."
             className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"/>
@@ -1272,7 +1480,10 @@ function OfferRow({ neg, originalPrice, loading, onAccept, onReject, onCounter }
               className="flex-1 py-2 border border-gray-200 rounded-lg text-xs font-medium text-gray-500 hover:bg-gray-100 transition">
               Anulează
             </button>
-            <button onClick={() => { onCounter(counterPrice, counterMsg); setShowCounter(false); setCounterPrice(''); setCounterMsg('') }}
+            <button onClick={() => {
+                onCounter(counterPrice, counterMsg, counterDate, counterTime)
+                setShowCounter(false); setCounterPrice(''); setCounterMsg('')
+              }}
               disabled={!counterPrice || loading}
               className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition disabled:opacity-50">
               Trimite
