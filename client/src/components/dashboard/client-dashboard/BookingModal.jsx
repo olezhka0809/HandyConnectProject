@@ -177,6 +177,15 @@ export default function BookingModal({ service, handyman, userId, onClose, onSuc
         .update({ times_booked: (service.times_booked ?? 0) + 1 })
         .eq('id', service.id)
 
+      // Notificare handyman
+      await supabase.from('notifications').insert({
+        user_id: handyman.user_id,
+        type: 'new_offer',
+        title: 'Rezervare nouă primită',
+        body: `${contactName} a rezervat serviciul „${service.title}"`,
+        data: { booking_id: data.id, redirect: '/handyman/jobs' },
+      })
+
       setBookingId(data.id)
       setStep(4)
       onSuccess?.()
