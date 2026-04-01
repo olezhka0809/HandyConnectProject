@@ -47,6 +47,17 @@ export default function ClientRescheduleModal({ request, jobTitle, onClose, onUp
         updated_at: new Date().toISOString(),
       }).eq('id', request.job_id)
 
+      // 3. Notify handyman
+      if (request.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: request.handyman_id,
+          type: 'task_accepted',
+          title: 'Reprogramare acceptată!',
+          body: `Clientul a acceptat reprogramarea pentru ${fmtDate(request.proposed_date)} la ${request.proposed_time}.`,
+          data: { job_id: request.job_id, job_type: request.job_type, redirect: '/handyman/jobs' },
+        })
+      }
+
       setMode('done')
       onUpdated?.()
     } catch (e) {
@@ -60,6 +71,15 @@ export default function ClientRescheduleModal({ request, jobTitle, onClose, onUp
       await supabase.from('reschedule_requests')
         .update({ status: 'rejected', responded_at: new Date().toISOString() })
         .eq('id', request.id)
+      if (request.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: request.handyman_id,
+          type: 'new_offer',
+          title: 'Reprogramare refuzată',
+          body: `Clientul a refuzat reprogramarea propusă pentru ${fmtDate(request.proposed_date)}.`,
+          data: { job_id: request.job_id, job_type: request.job_type, redirect: '/handyman/jobs' },
+        })
+      }
       setMode('done')
       onUpdated?.()
     } catch (e) {
@@ -87,6 +107,16 @@ export default function ClientRescheduleModal({ request, jobTitle, onClose, onUp
         status:        'pending_handyman',
         created_at:    new Date().toISOString(),
       })
+
+      if (request.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: request.handyman_id,
+          type: 'new_offer',
+          title: 'Contra-propunere de reprogramare',
+          body: `Clientul propune o dată alternativă: ${fmtDate(counterDate)} la ${counterTime}.`,
+          data: { job_id: request.job_id, job_type: request.job_type, redirect: '/handyman/jobs' },
+        })
+      }
 
       setMode('done')
       onUpdated?.()

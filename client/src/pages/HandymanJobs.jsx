@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams, useLocation } from 'react-router-dom'
 import { supabase } from '../supabase'
 import HandymanNavbar from '../components/handyman-dashboard/HandymanNavbar'
 import JobRequestModal from '../components/handyman-dashboard/JobRequestModal'
@@ -121,12 +122,19 @@ export default function HandymanJobs() {
   const [reschedules,   setReschedules]   = useState([])   // reschedule_requests by this handyman
   const [loading,       setLoading]       = useState(true)
   const [refreshing,    setRefreshing]    = useState(false)
-  const [activeTab,     setActiveTab]     = useState('all')
+  const [searchParams] = useSearchParams()
+  const location = useLocation()
+  const [activeTab,     setActiveTab]     = useState(location.state?.tab || 'all')
   const [searchQuery,   setSearchQuery]   = useState('')
   const [urgencyFilter, setUrgencyFilter] = useState('Toate')
-  const [selectedJob,   setSelectedJob]   = useState(null)
-  const [completedJob,  setCompletedJob]  = useState(null)
-  const [startingId,    setStartingId]    = useState(null)
+  const [selectedJob,           setSelectedJob]           = useState(null)
+  const [completedJob,          setCompletedJob]          = useState(null)
+  const [startingId,            setStartingId]            = useState(null)
+  const [pendingRescheduleId,   setPendingRescheduleId]   = useState(null)
+
+  useEffect(() => {
+    if (location.state?.tab) setActiveTab(location.state.tab)
+  }, [location.state])
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -161,7 +169,7 @@ export default function HandymanJobs() {
           .select(`
             *,
             task:task_id (
-              id, title, budget, status, contact_name, scheduled_date, scheduled_time,
+              id, title, budget, status, contact_name, scheduled_date, scheduled_time, client_id,
               profiles!tasks_client_id_fkey(first_name, last_name, avatar_url)
             )
           `)
@@ -330,6 +338,10 @@ export default function HandymanJobs() {
             reschedules={reschedules}
             jobs={jobs}
             onRefresh={() => fetchJobs(true)}
+            onOpenModal={(job, rescheduleId) => {
+              setPendingRescheduleId(rescheduleId)
+              setSelectedJob({ job, mode: 'details' })
+            }}
           />
 
         ) : filteredJobs.length === 0 ? (
@@ -358,8 +370,17 @@ export default function HandymanJobs() {
           job={selectedJob.job}
           initialMode={selectedJob.mode}
           userId={userId}
-          onClose={() => setSelectedJob(null)}
-          onUpdate={() => { setSelectedJob(null); fetchJobs(true) }}
+          onClose={() => { setSelectedJob(null); setPendingRescheduleId(null) }}
+          onUpdate={async () => {
+            if (pendingRescheduleId) {
+              await supabase.from('reschedule_requests')
+                .update({ status: 'accepted', responded_at: new Date().toISOString() })
+                .eq('id', pendingRescheduleId)
+              setPendingRescheduleId(null)
+            }
+            setSelectedJob(null)
+            fetchJobs(true)
+          }}
         />
       )}
       {completedJob && (
@@ -582,6 +603,15 @@ function NegotiationCard({ neg, onRefresh }) {
       created_at:         new Date().toISOString(),
       updated_at:         new Date().toISOString(),
     })
+    if (task?.client_id) {
+      await supabase.from('notifications').insert({
+        user_id: task.client_id,
+        type: 'new_offer',
+        title: 'Contra-ofertă primită',
+        body: `Meșteșugarul a propus ${counterPrice} RON pentru „${taskTitle}"`,
+        data: { task_id: neg.task_id },
+      })
+    }
     setSending(false)
     setShowCounter(false)
     setCounterPrice('')
@@ -772,7 +802,7 @@ function NegotiationCard({ neg, onRefresh }) {
 
 // ─── RESCHEDULE VIEW ──────────────────────────────────────────────────────────
 
-function RescheduleView({ reschedules, jobs, onRefresh }) {
+function RescheduleView({ reschedules, jobs, onRefresh, onOpenModal }) {
   if (reschedules.length === 0) return (
     <div className="text-center py-16 bg-white rounded-2xl border border-gray-100">
       <CalendarClock className="w-12 h-12 text-gray-200 mx-auto mb-4" />
@@ -802,7 +832,7 @@ function RescheduleView({ reschedules, jobs, onRefresh }) {
           </div>
           <div className="grid md:grid-cols-2 gap-4">
             {incoming.map(r => (
-              <RescheduleCard key={r.id} r={r} jobs={jobs} onRefresh={onRefresh} mode="incoming" />
+              <RescheduleCard key={r.id} r={r} jobs={jobs} onRefresh={onRefresh} mode="incoming" onOpenModal={onOpenModal} />
             ))}
           </div>
         </div>
@@ -843,7 +873,7 @@ function RescheduleView({ reschedules, jobs, onRefresh }) {
 
 // ─── RESCHEDULE CARD ──────────────────────────────────────────────────────────
 
-function RescheduleCard({ r, jobs, onRefresh, mode = 'outgoing' }) {
+function RescheduleCard({ r, jobs, onRefresh, mode = 'outgoing', onOpenModal }) {
   const [cancelling, setCancelling] = useState(false)
   const [saving, setSaving] = useState(false)
   const [showCounter, setShowCounter] = useState(false)
@@ -861,24 +891,9 @@ function RescheduleCard({ r, jobs, onRefresh, mode = 'outgoing' }) {
     onRefresh()
   }
 
-  const handleAcceptIncoming = async () => {
-    setSaving(true)
-    try {
-      const now = new Date().toISOString()
-      await supabase.from('reschedule_requests')
-        .update({ status: 'accepted', responded_at: now })
-        .eq('id', r.id)
-
-      const table = r.job_type === 'booking' ? 'bookings' : 'tasks'
-      await supabase.from(table).update({
-        scheduled_date: r.proposed_date,
-        scheduled_time: r.proposed_time,
-        updated_at: now,
-      }).eq('id', r.job_id)
-
-      onRefresh()
-    } finally {
-      setSaving(false)
+  const handleAcceptIncoming = () => {
+    if (job && onOpenModal) {
+      onOpenModal(job, r.id)
     }
   }
 
@@ -902,6 +917,16 @@ function RescheduleCard({ r, jobs, onRefresh, mode = 'outgoing' }) {
         status: 'pending_client',
         created_at: now,
       })
+
+      if (r.client_id) {
+        await supabase.from('notifications').insert({
+          user_id: r.client_id,
+          type: 'new_offer',
+          title: 'Contra-propunere de reprogramare',
+          body: `Meșteșugarul propune o dată alternativă: ${counterDate} la ${counterTime}.`,
+          data: { job_id: r.job_id, job_type: r.job_type, redirect: '/dashboard' },
+        })
+      }
 
       onRefresh()
     } finally {
@@ -1054,9 +1079,9 @@ function RescheduleCard({ r, jobs, onRefresh, mode = 'outgoing' }) {
 
       {(r.status === 'pending_handyman' || r.status === 'pending') && mode === 'incoming' && !showCounter && (
         <div className="flex gap-2">
-          <button onClick={handleAcceptIncoming} disabled={saving}
-            className="flex-1 py-2 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700 transition disabled:opacity-60">
-            {saving ? '...' : 'Acceptă'}
+          <button onClick={handleAcceptIncoming}
+            className="flex-1 py-2 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700 transition">
+            Acceptă
           </button>
           <button onClick={() => setShowCounter(true)}
             className="flex-1 py-2 border border-blue-200 text-blue-600 text-xs font-semibold rounded-lg hover:bg-blue-50 transition">
