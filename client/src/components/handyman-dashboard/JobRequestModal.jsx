@@ -88,6 +88,15 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
     try{
       if(job._type==='booking'){await supabase.from('bookings').update({status:'accepted',scheduled_date:scheduleDate||undefined,scheduled_time:scheduleTime||undefined,updated_at:new Date().toISOString()}).eq('id',job._id)}
       else{await supabase.from('tasks').update({status:'assigned',handyman_id:userId,scheduled_date:scheduleDate||undefined,scheduled_time:scheduleTime||undefined,updated_at:new Date().toISOString()}).eq('id',job._id)}
+      if(job.clientId){
+        await supabase.from('notifications').insert({
+          user_id:job.clientId,
+          type:'task_accepted',
+          title:job._type==='booking'?'Rezervare acceptată!':'Task acceptat!',
+          body:`„${job.title}" a fost acceptat. Verifică detaliile în dashboard.`,
+          data:{job_id:job._id,job_type:job._type,redirect:'/dashboard'},
+        })
+      }
       setMode('accept_done')
     }catch(e){setError('A apărut o eroare.')}finally{setSaving(false)}
   }
@@ -106,6 +115,15 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
     setSaving(true);setError(null)
     try{
       await supabase.from('reschedule_requests').insert({job_id:job._id,job_type:job._type,handyman_id:userId,client_id:job.clientId,proposed_date:reschedDate,proposed_time:reschedTime,message:reschedMessage||null,status:'pending_client',created_at:new Date().toISOString()})
+      if(job.clientId){
+        await supabase.from('notifications').insert({
+          user_id:job.clientId,
+          type:'new_offer',
+          title:'Cerere de reprogramare',
+          body:`Meșteșugarul propune reprogramarea „${job.title}" pe ${reschedDate} la ${reschedTime}.`,
+          data:{job_id:job._id,job_type:job._type,redirect:'/dashboard'},
+        })
+      }
       setMode('reschedule_done')
     }catch(e){setError('Eroare: '+(e.message??''))}finally{setSaving(false)}
   }
@@ -120,9 +138,18 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
     try{
       const uploadedUrls=[]
       for(const{file}of compPhotos){const ext=file.name.split('.').pop();const path=`${userId}/${job._id}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;const{error:upErr}=await supabase.storage.from('completion-photos').upload(path,file,{contentType:file.type});if(upErr)throw upErr;const{data:urlData}=supabase.storage.from('completion-photos').getPublicUrl(path);uploadedUrls.push(urlData.publicUrl)}
-      await supabase.from('job_completions').insert({job_id:job._id,job_type:job._type,handyman_id:userId,completion_photos:uploadedUrls,completion_description:compDesc||null})
+      await supabase.from('job_completions').insert({job_id:job._id,job_type:job._type,handyman_id:userId,completion_photos:uploadedUrls,completion_description:compDesc||null,...(job._type==='booking'?{booking_id:job._id}:{task_id:job._id})})
       const table=job._type==='booking'?'bookings':'tasks'
       await supabase.from(table).update({status:'completed',completed_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',job._id)
+      if(job.clientId){
+        await supabase.from('notifications').insert({
+          user_id: job.clientId,
+          type: 'service_completed',
+          title: 'Serviciu finalizat',
+          body: `„${job.title}" a fost marcat ca finalizat. Lasă o recenzie pentru meșteșugar!`,
+          data: { job_id: job._id, job_type: job._type },
+        })
+      }
       setMode('c4')
     }catch(e){setError('Eroare: '+(e.message??''))}finally{setSaving(false);setUploadProgress(false)}
   }
