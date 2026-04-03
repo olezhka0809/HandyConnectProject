@@ -1,23 +1,26 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { X, Calendar, CheckCheck, Bell, MessageSquare, XCircle, Star, CreditCard, Clock, AlertTriangle } from 'lucide-react'
+import { X, Calendar, CheckCheck, Bell, MessageSquare, XCircle, Star, CreditCard, Clock, AlertTriangle, ThumbsUp } from 'lucide-react'
 import { supabase } from '../supabase'
 
 const redirectMap = {
-  new_offer:         '/dashboard?tab=offers',
-  offer_counter:     '/handyman/jobs?tab=negotiations',
-  task_accepted:     '/handyman/jobs?tab=negotiations',
-  cancellation:      '/handyman/jobs?tab=negotiations',
-  service_completed: '/dashboard?tab=tasks',
-  new_review:        '/handyman/reviews',
-  booking_confirmed: '/dashboard?tab=bookings',
-  feedback_request:  '/dashboard?tab=tasks',
+  new_offer:          '/dashboard?tab=offers',
+  offer_counter:      '/handyman/jobs?tab=negotiations',
+  task_accepted:      '/handyman/jobs?tab=accepted',
+  cancellation:       '/handyman/jobs?tab=negotiations',
+  service_completed:  '/dashboard?tab=tasks&filter=completed',
+  reschedule_request: '/dashboard?tab=reschedule',
+  new_review:         '/handyman/reviews',
+  booking_confirmed:  '/dashboard?tab=bookings',
+  feedback_request:   '/dashboard?tab=tasks',
+  task_proposed:      '/handyman/jobs?tab=proposed',
 }
 
 const iconMap = {
   booking_confirmed: { icon: CheckCheck, color: 'text-green-500', bg: 'bg-green-100' },
   booking_reminder: { icon: Bell, color: 'text-blue-500', bg: 'bg-blue-100' },
-  booking_rescheduled: { icon: Clock, color: 'text-yellow-600', bg: 'bg-yellow-100' },
+  booking_rescheduled:  { icon: Clock,     color: 'text-yellow-600', bg: 'bg-yellow-100' },
+  reschedule_request:   { icon: Clock,     color: 'text-blue-500',   bg: 'bg-blue-100' },
   service_completed: { icon: CheckCheck, color: 'text-green-500', bg: 'bg-green-100' },
   new_message: { icon: MessageSquare, color: 'text-purple-500', bg: 'bg-purple-100' },
   cancellation: { icon: XCircle, color: 'text-red-500', bg: 'bg-red-100' },
@@ -26,7 +29,8 @@ const iconMap = {
   new_offer:     { icon: AlertTriangle, color: 'text-yellow-500', bg: 'bg-yellow-100' },
   offer_counter: { icon: AlertTriangle, color: 'text-orange-500', bg: 'bg-orange-100' },
   task_accepted: { icon: CheckCheck, color: 'text-green-500', bg: 'bg-green-100' },
-  new_task: { icon: Bell, color: 'text-blue-500', bg: 'bg-blue-100' },
+  new_task:      { icon: Bell,       color: 'text-blue-500',  bg: 'bg-blue-100' },
+  new_review:    { icon: Star,       color: 'text-yellow-500', bg: 'bg-yellow-100' },
 }
 
 const formatDateLabel = (dateStr) => {
@@ -45,6 +49,32 @@ export default function NotificationPanel({ isOpen, onClose }) {
   const panelRef = useRef(null)
   const navigate = useNavigate()
 
+  const resolveNavigationTarget = (notif) => {
+    // Force smart routing for completion notifications based on job type.
+    if (notif.type === 'service_completed') {
+      const isBookingCompletion = notif.data?.job_type === 'booking' || !!notif.data?.booking_id
+      if (isBookingCompletion) {
+        return { path: '/dashboard', state: { tab: 'bookings', bookingFilter: 'completed' } }
+      }
+      return { path: '/dashboard', state: { tab: 'tasks', filter: 'completed' } }
+    }
+
+    const rawPath = notif.data?.redirect || redirectMap[notif.type]
+    if (!rawPath) return null
+
+    const [path, query] = rawPath.split('?')
+    const params = new URLSearchParams(query || '')
+
+    return {
+      path,
+      state: {
+        tab: params.get('tab') || undefined,
+        filter: params.get('filter') || undefined,
+        bookingFilter: params.get('bookingFilter') || undefined,
+      },
+    }
+  }
+
   const unreadCount = notifications.filter(n => !n.is_read).length
 
   // Fetch notificari + realtime
@@ -59,6 +89,7 @@ export default function NotificationPanel({ isOpen, onClose }) {
         .from('notifications')
         .select('*')
         .eq('user_id', user.id)
+        .neq('type', 'new_message')
         .order('created_at', { ascending: false })
         .limit(50)
 
@@ -72,6 +103,7 @@ export default function NotificationPanel({ isOpen, onClose }) {
           table: 'notifications',
           filter: `user_id=eq.${user.id}`
         }, (payload) => {
+          if (payload.new?.type === 'new_message') return
           setNotifications(prev => [payload.new, ...prev])
         })
         .subscribe()
@@ -102,13 +134,15 @@ export default function NotificationPanel({ isOpen, onClose }) {
   const markAllAsRead = async () => {
     const { data: { user } } = await supabase.auth.getUser()
     setNotifications(prev => prev.map(n => ({ ...n, is_read: true })))
-    await supabase.from('notifications').update({ is_read: true }).eq('user_id', user.id)
+    await supabase.from('notifications').update({ is_read: true })
+      .eq('user_id', user.id).neq('type', 'new_message')
   }
 
   const clearAll = async () => {
     const { data: { user } } = await supabase.auth.getUser()
     setNotifications([])
-    await supabase.from('notifications').delete().eq('user_id', user.id)
+    await supabase.from('notifications').delete()
+      .eq('user_id', user.id).neq('type', 'new_message')
   }
 
   const formatTime = (createdAt) => {
@@ -189,12 +223,10 @@ export default function NotificationPanel({ isOpen, onClose }) {
                       key={notif.id}
                       onClick={() => {
                         markAsRead(notif.id)
-                        const rawPath = notif.data?.redirect || redirectMap[notif.type]
-                        if (rawPath) {
+                        const target = resolveNavigationTarget(notif)
+                        if (target) {
                           onClose()
-                          const [path, query] = rawPath.split('?')
-                          const tab = query?.split('tab=')?.[1]
-                          navigate(path, { state: { tab } })
+                          navigate(target.path, { state: target.state })
                         }
                       }}
                       className={`flex items-start gap-3 px-6 py-4 border-b border-gray-50 cursor-pointer transition-all hover:bg-gray-50

@@ -21,6 +21,8 @@ import ClientProfile from './pages/ClientProfile'
 import HandymanFeed from './pages/HandymanFeed'
 import HandymanPersonalProfile from './pages/HandymanPersonalProfile'
 import HandymanMyProfile from './pages/HandymanMyProfile'
+import Messages from './pages/Messages'
+import HandymanMessages from './pages/HandymanMessages'
 import ProtectedRoute from './components/ProtectedRoute'
 
 function App() {
@@ -46,6 +48,7 @@ function App() {
         <Route path="/issues" element={<ProtectedRoute allowedRoles={['client']}><Issues /></ProtectedRoute>} />
         <Route path="/post-task" element={<ProtectedRoute allowedRoles={['client']}><PostTask /></ProtectedRoute>} />
         <Route path="/profile" element={<ProtectedRoute allowedRoles={['client']}><ClientProfile /></ProtectedRoute>} />
+        <Route path="/messages" element={<ProtectedRoute allowedRoles={['client']}><Messages /></ProtectedRoute>} />
 
         <Route path="/handyman-onboarding" element={<ProtectedRoute allowedRoles={['handyman']} requireOnboarding={false}><HandymanOnboarding /></ProtectedRoute>} />
         <Route path="/handyman/dashboard" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanDashboard /></ProtectedRoute>} />
@@ -54,6 +57,7 @@ function App() {
         <Route path="/handyman/services" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanServices /></ProtectedRoute>} />
         <Route path="/handyman/feed" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanFeed /></ProtectedRoute>} />
         <Route path="/handyman/my-profile" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanMyProfile /></ProtectedRoute>} />
+        <Route path="/handyman/messages" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanMessages /></ProtectedRoute>} />
         <Route path="/handyman/personal-profile" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanPersonalProfile /></ProtectedRoute>} />
         
       </Routes>

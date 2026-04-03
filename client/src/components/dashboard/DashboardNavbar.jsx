@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Search, AlertCircle, MessageSquare, Settings, Bell, LogOut } from 'lucide-react'
+import { Home, Search, AlertCircle, MessageSquare, Bell, LogOut } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { supabase } from '../../supabase'
 import logo from '../../assets/Logo_pin.png'
@@ -17,6 +17,7 @@ export default function DashboardNavbar() {
   const [profile, setProfile] = useState(null)
   const [showNotifications, setShowNotifications] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
+  const [unreadMessages, setUnreadMessages] = useState(0)
   const profilePath = location.pathname.startsWith('/handyman') ? '/handyman/personal-profile' : '/profile'
 
   const isActive = (path) => location.pathname === path
@@ -38,7 +39,15 @@ export default function DashboardNavbar() {
           .select('*', { count: 'exact', head: true })
           .eq('user_id', user.id)
           .eq('is_read', false)
+          .neq('type', 'new_message')
         setUnreadCount(count ?? 0)
+
+        const { count: msgCount } = await supabase
+          .from('messages')
+          .select('*', { count: 'exact', head: true })
+          .eq('is_read', false)
+          .neq('sender_id', user.id)
+        setUnreadMessages(msgCount ?? 0)
 
         channel = supabase
           .channel('dashboard-navbar-notif')
@@ -47,7 +56,13 @@ export default function DashboardNavbar() {
             schema: 'public',
             table: 'notifications',
             filter: `user_id=eq.${user.id}`,
-          }, () => setUnreadCount(prev => prev + 1))
+          }, (payload) => {
+            if (payload.new?.type === 'new_message') {
+              setUnreadMessages(prev => prev + 1)
+            } else {
+              setUnreadCount(prev => prev + 1)
+            }
+          })
           .subscribe()
       }
     }
@@ -96,9 +111,18 @@ export default function DashboardNavbar() {
 
           {/* Right side: icons + avatar */}
           <div className="flex items-center gap-2">
-            <button className="w-10 h-10 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 hover:text-blue-600 transition">
+            <Link
+              to="/messages"
+              onClick={() => setUnreadMessages(0)}
+              className="relative w-10 h-10 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 hover:text-blue-600 transition"
+            >
               <MessageSquare className="w-5 h-5" />
-            </button>
+              {unreadMessages > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-600 rounded-full text-white text-[10px] flex items-center justify-center font-bold">
+                  {unreadMessages > 9 ? '9+' : unreadMessages}
+                </span>
+              )}
+            </Link>
             <button
               onClick={() => { setShowNotifications(true); setUnreadCount(0) }}
               className="relative w-10 h-10 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 hover:text-blue-600 transition">
