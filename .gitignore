@@ -140,3 +140,4 @@ vite.config.ts.timestamp-*
 
 # Demo/test scripts
 scripts/
+README_DB.md
