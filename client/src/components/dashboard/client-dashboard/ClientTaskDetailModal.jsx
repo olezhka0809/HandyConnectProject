@@ -510,7 +510,20 @@ function CompletionApprovalSection({ completion, taskId, taskTitle, handymanId, 
       }).eq('id', localData.id)
       if (compErr) throw compErr
 
-      // 2. Insert review
+      // 2. Update task status to client_approved
+      await supabase.from('tasks').update({ status: 'client_approved', updated_at: now }).eq('id', taskId)
+
+      // 3. Increment handyman's completed jobs counter (also covered by DB trigger)
+      if (handymanId) {
+        const { data: hp } = await supabase.from('handyman_profiles').select('total_jobs_completed').eq('user_id', handymanId).maybeSingle()
+        if (hp) {
+          await supabase.from('handyman_profiles')
+            .update({ total_jobs_completed: (hp.total_jobs_completed ?? 0) + 1 })
+            .eq('user_id', handymanId)
+        }
+      }
+
+      // 4. Insert review
       if (cId && handymanId) {
         const { error: reviewErr } = await supabase.from('reviews').insert({
           task_id:      taskId,
@@ -530,9 +543,12 @@ function CompletionApprovalSection({ completion, taskId, taskTitle, handymanId, 
           type: 'new_review',
           title: 'Recenzie nouă primită',
           body: `Ai primit o recenzie de ${stars} pentru „${taskTitle || 'un job finalizat'}"`,
-          data: { task_id: taskId, rating },
+          data: { task_id: taskId, rating, redirect: '/handyman/reviews' },
         })
       }
+
+      // 5. Închide conversația aferentă task-ului
+      await supabase.from('conversations').update({ is_closed: true }).eq('task_id', taskId)
 
       setLocalData(prev => ({ ...prev, client_accepted: true, client_rating: rating, client_review: reviewText || null }))
       onMsg?.('Lucrarea a fost aprobată și recenzia a fost salvată!')
@@ -1248,6 +1264,7 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
           category_id:    taskData.category_id ?? '',
           urgency:        taskData.urgency ?? 'normal',
           budget:         taskData.budget ?? '',
+          approximate_duration: taskData.approximate_duration ?? '',
           address_county: taskData.address_county ?? '',
           scheduled_date: taskData.scheduled_date ?? '',
           scheduled_time: taskData.scheduled_time ?? '',
@@ -1273,12 +1290,13 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
   const acceptedOffer = offers.find(o => o.status === 'accepted')
   const effectiveFinalPrice = task?.final_price ?? acceptedOffer?.proposed_price ?? null
   const isAssigned = task?.status === 'assigned'
+  const isDelayed = task?.status === 'delayed'
   const isInProgress = task?.status === 'in_progress'
   const isCompleted = task?.status === 'completed'
   const isCancelled = task?.status === 'cancelled'
   // Task-ul nu mai poate fi editat odată ce a primit un handyman sau a început/finalizat
-  const isReadOnly = isAssigned || isInProgress || isCompleted
-  const canRescheduleTask = isAssigned && !isInProgress && !isCompleted && !isCancelled
+  const isReadOnly = isAssigned || isDelayed || isInProgress || isCompleted
+  const canRescheduleTask = (isAssigned || isDelayed) && !isInProgress && !isCompleted && !isCancelled
   const canCancelTask = !isInProgress && !isCompleted && !isCancelled
   const postedAt  = task?.created_at
     ? new Date(task.created_at).toLocaleDateString('ro-RO', { day: '2-digit', month: 'long', year: 'numeric' })
@@ -1288,6 +1306,7 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
     pending:   'bg-yellow-100 text-yellow-700',
     open:      'bg-green-100 text-green-700',
     assigned:  'bg-blue-100 text-blue-700',
+    delayed:   'bg-orange-100 text-orange-700',
     completed: 'bg-gray-100 text-gray-600',
     cancelled: 'bg-red-100 text-red-700',
   }
@@ -1311,6 +1330,7 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
       category_id:    editForm.category_id || null,
       urgency:        editForm.urgency,
       budget:         editForm.budget ? Number(editForm.budget) : null,
+      approximate_duration: editForm.approximate_duration || null,
       address_county: editForm.address_county,
       scheduled_date: editForm.scheduled_date || null,
       scheduled_time: editForm.scheduled_time || null,
@@ -1552,6 +1572,7 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
                     {task.status === 'pending'   ? 'În așteptare' :
                      task.status === 'open'      ? 'Deschis' :
                      task.status === 'assigned'  ? 'Atribuit' :
+                     task.status === 'delayed'   ? 'Întârziat' :
                      task.status === 'completed' ? 'Finalizat' :
                      task.status === 'cancelled' ? 'Anulat' : task.status}
                   </span>
@@ -1684,6 +1705,17 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
                       </div>
                     </div>
                   )}
+                  {task.approximate_duration && (
+                    <div className="flex items-center gap-3 p-3">
+                      <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+                        <Clock className="w-4 h-4 text-blue-500" />
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-400 uppercase tracking-wide font-medium">Durată estimată</p>
+                        <p className="text-sm text-gray-700 font-semibold">{task.approximate_duration}</p>
+                      </div>
+                    </div>
+                  )}
                   {effectiveFinalPrice && (
                     <div className="flex items-center gap-3 p-3">
                       <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center flex-shrink-0">
@@ -1731,6 +1763,18 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
                   </div>
                 )}
 
+                {isDelayed && (
+                  <div className="flex items-start gap-3 p-3.5 bg-orange-50 border border-orange-200 rounded-xl">
+                    <AlertTriangle className="w-5 h-5 text-orange-600 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold text-orange-800">Task marcat ca întârziat</p>
+                      <p className="text-xs text-orange-700 mt-0.5">
+                        {task.delay_reason || 'Handymanul a anunțat că ajunge cu întârziere.'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {(canRescheduleTask || canCancelTask) && (
                   <div className="flex gap-2">
                     <button
@@ -1752,7 +1796,7 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
 
                 {isReadOnly && (
                   <p className="text-xs text-gray-400">
-                    Task-ul nu mai poate fi editat după atribuire. Poți folosi reprogramarea dacă e alocat.
+                    Task-ul nu mai poate fi editat după atribuire. Poți folosi reprogramarea dacă e alocat sau întârziat.
                   </p>
                 )}
 
@@ -1901,12 +1945,24 @@ export default function ClientTaskDetailModal({ taskId, onClose, onUpdated }) {
                     </div>
                   </div>
                   <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Durată estimată</label>
+                    <input type="text" value={editForm.approximate_duration}
+                      onChange={e => setEditForm(p => ({ ...p, approximate_duration: e.target.value }))}
+                      disabled={isReadOnly}
+                      placeholder="Ex: 2-3 ore"
+                      className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1.5">Județ</label>
                     <input type="text" value={editForm.address_county}
                       onChange={e => setEditForm(p => ({ ...p, address_county: e.target.value }))}
                       disabled={isReadOnly}
                       className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
                   </div>
+                  <div />
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">

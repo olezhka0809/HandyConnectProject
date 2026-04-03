@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../supabase'
 import {
   X, CheckCircle, XCircle, Calendar, Clock, MapPin,
@@ -11,6 +12,7 @@ import {
 const ROMANIAN_WORDS = ['ALBASTRU','RAPID','CERUL','VERDE','STEJAR','MUNTE','FULGER','ROATA','FLUTURE','CASA','DRUM','PIATRA']
 const TIME_SLOTS = ['08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00']
 const CONFIRM_WORD = 'ACCEPT'
+const DURATION_OPTIONS = ['30 minute', '1 oră', '1-2 ore', '2-3 ore', '3-4 ore', '4-6 ore', '6-8 ore', '1 zi', 'Peste 1 zi']
 
 function randomPhrase() {
   const w1 = ROMANIAN_WORDS[Math.floor(Math.random()*ROMANIAN_WORDS.length)]
@@ -42,6 +44,7 @@ function ProgressDots({mode}){
 }
 
 export default function JobRequestModal({job,initialMode='details',userId,onClose,onUpdate}){
+  const navigate=useNavigate()
   const [mode,setMode]=useState('details')
   const [client,setClient]=useState(null)
   const [saving,setSaving]=useState(false)
@@ -53,6 +56,8 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
   const [pendingResched,setPendingResched]=useState(null)
   const [scheduleDate,setScheduleDate]=useState(job._raw.scheduled_date??'')
   const [scheduleTime,setScheduleTime]=useState(job._raw.scheduled_time??'')
+  const [estimatedDuration,setEstimatedDuration]=useState(job._raw.approximate_duration??'')
+  const [delayReason,setDelayReason]=useState('')
   const [phrase]=useState(()=>randomPhrase())
   const [phraseInput,setPhraseInput]=useState('')
   const [phraseError,setPhraseError]=useState(false)
@@ -82,12 +87,14 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
   const clientEmail=job._raw.contact_email??null
   const photos=job.photos??[]
   const canReschedule=['new','accepted'].includes(job.uiStatus)
+  const isTask = job._type === 'task'
+  const isDelayed = job.uiStatus === 'delayed'
 
   const handleAccept=async()=>{
     setSaving(true);setError(null)
     try{
       if(job._type==='booking'){await supabase.from('bookings').update({status:'accepted',scheduled_date:scheduleDate||undefined,scheduled_time:scheduleTime||undefined,updated_at:new Date().toISOString()}).eq('id',job._id)}
-      else{await supabase.from('tasks').update({status:'assigned',handyman_id:userId,scheduled_date:scheduleDate||undefined,scheduled_time:scheduleTime||undefined,updated_at:new Date().toISOString()}).eq('id',job._id)}
+      else{await supabase.from('tasks').update({status:'assigned',handyman_id:userId,scheduled_date:scheduleDate||undefined,scheduled_time:scheduleTime||undefined,approximate_duration:estimatedDuration||null,updated_at:new Date().toISOString()}).eq('id',job._id)}
       if(job.clientId){
         await supabase.from('notifications').insert({
           user_id:job.clientId,
@@ -96,9 +103,102 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
           body:`„${job.title}" a fost acceptat. Verifică detaliile în dashboard.`,
           data:{job_id:job._id,job_type:job._type,redirect:'/dashboard'},
         })
+
+        // Creare conversație automată dacă nu există deja
+        const convField=job._type==='booking'?'booking_id':'task_id'
+        const {data:existingConv}=await supabase.from('conversations').select('id').eq('handyman_id',userId).eq('client_id',job.clientId).eq(convField,job._id).maybeSingle()
+        if(!existingConv){
+          await supabase.from('conversations').insert({
+            client_id:job.clientId,
+            handyman_id:userId,
+            [convField]:job._id,
+          })
+        }
       }
       setMode('accept_done')
     }catch(e){setError('A apărut o eroare.')}finally{setSaving(false)}
+  }
+
+  const handleMarkDelayed=async()=>{
+    setSaving(true);setError(null)
+    try{
+      // Determine which RPC to call based on job type
+      const rpcFunc = job._type === 'booking' ? 'mark_booking_delayed' : 'mark_task_delayed'
+      const idParam = job._type === 'booking' ? 'p_booking_id' : 'p_task_id'
+      
+      // Call RPC with server-side validation + conflict detection
+      const rpcParams = {
+        [idParam]: job._id,
+        p_delay_reason: delayReason || 'Lucrarea anterioară durează mai mult.',
+        p_user_id: userId
+      }
+      
+      const {data,error:rpcError} = await supabase.rpc(rpcFunc, rpcParams)
+      
+      if(rpcError)throw rpcError
+      if(data?.success===false){
+        if(data.error_code==='UNAUTHORIZED')setError('Nu ești autorizat să marchezi această lucrare ca întârziată.')
+        else if(data.error_code==='INVALID_STATE_TRANSITION')setError(`Nu poți marca ca întârziat din starea: ${job.uiStatus}`)
+        else if(data.error_code==='TASK_NOT_FOUND' || data.error_code==='BOOKING_NOT_FOUND')setError('Lucrarea nu a fost găsită.')
+        else setError(data.error||'Eroare server.')
+        setSaving(false)
+        return
+      }
+
+      // Check for scheduling conflicts (warning only)
+      if(data?.warnings?.has_scheduling_conflict){
+        setError('⚠️ Atenție: Ai alte lucrări active în aceeași perioadă. Verifică agenda.')
+      }
+
+      if(job.clientId){
+        await supabase.from('notifications').insert({
+          user_id:job.clientId,
+          type:'new_offer',
+          title:'Actualizare: lucrare întârziată',
+          body:`„${job.title}" este marcat temporar ca întârziat. Poți reprograma sau anula din dashboard.`,
+          data:{job_id:job._id,job_type:job._type,redirect:'/dashboard'},
+        })
+      }
+      onUpdate?.()
+    }catch(e){setError(`Nu am putut marca întârzierea: ${e.message}`)}finally{setSaving(false)}
+  }
+
+  const handleResumeFromDelay=async()=>{
+    setSaving(true);setError(null)
+    try{
+      // Determine which RPC to call based on job type
+      const rpcFunc = job._type === 'booking' ? 'resume_booking_from_delay' : 'resume_from_delay'
+      const idParam = job._type === 'booking' ? 'p_booking_id' : 'p_task_id'
+      
+      // Call RPC with server-side validation
+      const rpcParams = {
+        [idParam]: job._id,
+        p_user_id: userId
+      }
+      
+      const {data,error:rpcError} = await supabase.rpc(rpcFunc, rpcParams)
+      
+      if(rpcError)throw rpcError
+      if(data?.success===false){
+        if(data.error_code==='UNAUTHORIZED')setError('Nu ești autorizat să relui această lucrare.')
+        else if(data.error_code==='INVALID_STATE_TRANSITION')setError(`Nu poți relua din starea: ${job.uiStatus}. Lucrarea trebuie să fie în stare "Întârziat".`)
+        else if(data.error_code==='TASK_NOT_FOUND' || data.error_code==='BOOKING_NOT_FOUND')setError('Lucrarea nu a fost găsită.')
+        else setError(data.error||'Eroare server.')
+        setSaving(false)
+        return
+      }
+
+      if(job.clientId){
+        await supabase.from('notifications').insert({
+          user_id:job.clientId,
+          type:'task_accepted',
+          title:'Update: lucrarea a fost reluată',
+          body:`„${job.title}" a revenit în starea "în progres".`,
+          data:{job_id:job._id,job_type:job._type,redirect:'/dashboard'},
+        })
+      }
+      onUpdate?.()
+    }catch(e){setError(`Nu am putut relua lucrarea: ${e.message}`)}finally{setSaving(false)}
   }
 
   const handleDecline=async()=>{
@@ -147,8 +247,18 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
           type: 'service_completed',
           title: 'Serviciu finalizat',
           body: `„${job.title}" a fost marcat ca finalizat. Lasă o recenzie pentru meșteșugar!`,
-          data: { job_id: job._id, job_type: job._type },
+          data: {
+            job_id: job._id,
+            job_type: job._type,
+            redirect: job._type === 'booking'
+              ? '/dashboard?tab=bookings&bookingFilter=completed'
+              : '/dashboard?tab=tasks&filter=completed',
+          },
         })
+      }
+      // Închide conversația pentru bookings (la tasks o închide clientul la aprobare)
+      if(job._type==='booking'){
+        await supabase.from('conversations').update({is_closed:true}).eq('booking_id',job._id)
       }
       setMode('c4')
     }catch(e){setError('Eroare: '+(e.message??''))}finally{setSaving(false);setUploadProgress(false)}
@@ -192,6 +302,8 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
                 <div className="bg-white border border-gray-100 rounded-xl p-3"><p className="text-xs text-gray-400 font-medium uppercase tracking-wide mb-2">Programare</p><div className="flex items-center gap-1.5 text-sm text-gray-700"><Calendar className="w-3.5 h-3.5 text-gray-400"/><span>{job.date}</span></div></div>
                 <div className="bg-white border border-gray-100 rounded-xl p-3"><p className="text-xs text-gray-400 font-medium uppercase tracking-wide mb-2">Locație</p><div className="flex items-start gap-1.5 text-sm text-gray-700"><MapPin className="w-3.5 h-3.5 text-gray-400 flex-shrink-0 mt-0.5"/><span>{job.address||'—'}</span></div></div>
               </div>
+              {job.approximateDuration&&<div className="bg-white border border-gray-100 rounded-xl p-3"><p className="text-xs text-gray-400 font-medium uppercase tracking-wide mb-2">Durată estimată</p><div className="flex items-center gap-1.5 text-sm text-gray-700"><Clock className="w-3.5 h-3.5 text-gray-400"/><span>{job.approximateDuration}</span></div></div>}
+              {isDelayed&&<div className="p-3 bg-orange-50 border border-orange-200 rounded-xl"><p className="text-xs font-bold text-orange-800">Status întârziat</p><p className="text-xs text-orange-700 mt-0.5">Clientul vede întârzierea și poate decide reprogramare sau anulare.</p></div>}
               <div className="bg-white border border-gray-100 rounded-xl p-4">
                 <p className="text-xs text-gray-400 font-medium uppercase tracking-wide mb-3">Client</p>
                 <div className="flex items-center gap-3 mb-3">
@@ -257,6 +369,15 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
                     </select>
                   </div>
                 </div>
+                {isTask&&(
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1.5">Durată estimată lucrare</label>
+                    <select value={estimatedDuration} onChange={e=>setEstimatedDuration(e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+                      <option value="">Selectează</option>
+                      {DURATION_OPTIONS.map(d=><option key={d} value={d}>{d}</option>)}
+                    </select>
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -308,6 +429,21 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
               <div>
                 <label className="block text-sm font-bold text-gray-700 mb-2">Mesaj <span className="font-normal text-gray-400">(opțional)</span></label>
                 <textarea value={reschedMessage} onChange={e=>setReschedMessage(e.target.value)} rows={3} placeholder="Ex: Am o urgență în acea zi..." className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-sm"/>
+              </div>
+            </>
+          )}
+
+          {/* ── DELAY ── */}
+          {mode==='delay'&&(
+            <>
+              <div className="text-center">
+                <div className="w-14 h-14 bg-orange-50 border-2 border-orange-200 rounded-full flex items-center justify-center mx-auto mb-3"><AlertTriangle className="w-6 h-6 text-orange-600"/></div>
+                <h3 className="font-bold text-gray-800 text-lg">Marchează jobul ca întârziat</h3>
+                <p className="text-sm text-gray-500 mt-1">Clientul primește notificare și poate reprograma/anula.</p>
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">Motiv (opțional)</label>
+                <textarea value={delayReason} onChange={e=>setDelayReason(e.target.value)} rows={3} placeholder="Ex: lucrarea anterioară depășește estimarea" className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none text-sm"/>
               </div>
             </>
           )}
@@ -385,10 +521,19 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
             </>}
             {mode==='details'&&job.uiStatus==='accepted'&&<>
               <button onClick={()=>setMode('reschedule')} className="flex items-center justify-center gap-1.5 px-4 py-2.5 border border-blue-200 rounded-xl text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 transition"><CalendarClock className="w-4 h-4"/>Reprogramează</button>
-              <button className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-400 cursor-not-allowed" disabled><MessageSquare className="w-4 h-4"/>Mesaj</button>
+              <button onClick={()=>{onClose?.();navigate(`/handyman/messages?${job._type}_id=${job._id}`)}} className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 border border-blue-200 rounded-xl text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 transition"><MessageSquare className="w-4 h-4"/>Mesaj</button>
             </>}
             {mode==='details'&&job.uiStatus==='in_progress'&&(
-              <button onClick={()=>setMode('c1')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-xl text-sm font-medium hover:bg-green-700 transition"><CheckCircle className="w-4 h-4"/>Marchează Finalizat</button>
+              <>
+                <button onClick={()=>setMode('c1')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-xl text-sm font-medium hover:bg-green-700 transition"><CheckCircle className="w-4 h-4"/>Marchează Finalizat</button>
+                <button onClick={()=>setMode('delay')} className="px-4 py-2.5 border border-orange-200 text-orange-700 bg-orange-50 rounded-xl text-sm font-medium hover:bg-orange-100 transition">Întârziat</button>
+              </>
+            )}
+            {mode==='details'&&isDelayed&&(
+              <>
+                <button onClick={handleResumeFromDelay} disabled={saving} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition disabled:opacity-60">{saving?<Loader2 className="w-4 h-4 animate-spin"/>:<RefreshCw className="w-4 h-4"/>}Reia Lucrarea</button>
+                <button onClick={()=>setMode('c1')} className="px-4 py-2.5 border border-green-200 text-green-700 bg-green-50 rounded-xl text-sm font-medium hover:bg-green-100 transition">Finalizează</button>
+              </>
             )}
             {mode==='confirm_accept'&&<>
               <button onClick={()=>setMode('details')} className="px-5 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition">Înapoi</button>
@@ -405,6 +550,10 @@ export default function JobRequestModal({job,initialMode='details',userId,onClos
             {mode==='reschedule'&&<>
               <button onClick={()=>setMode('details')} className="px-5 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition">Înapoi</button>
               <button onClick={handleReschedule} disabled={saving||!reschedDate||!reschedTime} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition disabled:opacity-50">{saving?<Loader2 className="w-4 h-4 animate-spin"/>:<CalendarClock className="w-4 h-4"/>}Trimite Cererea</button>
+            </>}
+            {mode==='delay'&&<>
+              <button onClick={()=>setMode('details')} className="px-5 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition">Înapoi</button>
+              <button onClick={handleMarkDelayed} disabled={saving} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition disabled:opacity-50">{saving?<Loader2 className="w-4 h-4 animate-spin"/>:<AlertTriangle className="w-4 h-4"/>}Confirmă Întârzierea</button>
             </>}
             {mode==='c2'&&<>
               <button onClick={()=>setMode('c1')} className="px-5 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition">Înapoi</button>

@@ -4,7 +4,7 @@ import { supabase } from '../../../supabase'
 import {
   X, Calendar, Clock, MapPin, Phone, Mail, User,
   ChevronLeft, ChevronRight, CheckCircle, Loader2,
-  AlertTriangle, Zap, Shield, Wrench, Star, CreditCard,
+  AlertTriangle, Zap, Shield, Wrench, Star, CreditCard, XCircle,
   Banknote, MessageSquare, AlertCircle, ExternalLink,
   CalendarClock, Send
 } from 'lucide-react'
@@ -30,12 +30,37 @@ function StarRow({ rating }) {
   )
 }
 
+function StarRating({ value, onChange, readOnly = false }) {
+  const [hovered, setHovered] = useState(null)
+  const display = hovered ?? value
+
+  return (
+    <div className="flex gap-1">
+      {[1, 2, 3, 4, 5].map(n => (
+        <button
+          key={n}
+          type="button"
+          disabled={readOnly}
+          onClick={() => !readOnly && onChange?.(n)}
+          onMouseEnter={() => !readOnly && setHovered(n)}
+          onMouseLeave={() => !readOnly && setHovered(null)}
+          className={`w-9 h-9 flex items-center justify-center rounded-lg transition ${readOnly ? 'cursor-default' : 'hover:scale-110 cursor-pointer'}`}
+        >
+          <Star className={`w-7 h-7 transition-colors ${n <= display ? 'text-yellow-400 fill-yellow-400' : 'text-gray-200 fill-gray-200'}`} />
+        </button>
+      ))}
+    </div>
+  )
+}
+
 const STATUS_LABEL = {
   pending:    'În așteptare',
   confirmed:  'Confirmat',
   assigned:   'Alocat',
   in_progress:'În lucru',
   completed:  'Finalizat',
+  client_approved: 'Acceptat de client',
+  client_rejected: 'Respins de client',
   cancelled:  'Anulat',
 }
 const STATUS_COLOR = {
@@ -44,6 +69,8 @@ const STATUS_COLOR = {
   assigned:   'bg-blue-100 text-blue-700',
   in_progress:'bg-purple-100 text-purple-700',
   completed:  'bg-green-100 text-green-700',
+  client_approved: 'bg-emerald-100 text-emerald-700',
+  client_rejected: 'bg-rose-100 text-rose-700',
   cancelled:  'bg-red-100 text-red-700',
 }
 function StatusBadge({ status }) {
@@ -116,8 +143,18 @@ const TIME_SLOTS = ['08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:
 export default function ClientBookingDetailModal({ bookingId, onClose, onUpdated }) {
   const navigate  = useNavigate()
   const [booking, setBooking] = useState(null)
+  const [completion, setCompletion] = useState(null)
+  const [bookingReview, setBookingReview] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState(null)
+
+  const [rating, setRating] = useState(5)
+  const [reviewText, setReviewText] = useState('')
+  const [reviewSaving, setReviewSaving] = useState(false)
+  const [reviewError, setReviewError] = useState(null)
+  const [clientReplyText, setClientReplyText] = useState('')
+  const [clientReplySaving, setClientReplySaving] = useState(false)
+  const [showClientReplyForm, setShowClientReplyForm] = useState(false)
 
   // reschedule state
   const [showReschedForm, setShowReschedForm] = useState(false)
@@ -131,22 +168,175 @@ export default function ClientBookingDetailModal({ bookingId, onClose, onUpdated
   useEffect(() => {
     if (!bookingId) return
     setLoading(true)
-    supabase
-      .from('bookings')
-      .select(`
-        *,
-        handyman:handyman_id(id, first_name, last_name, avatar_url),
-        service:service_id(id, title, description, base_price, price_per_hour, estimated_duration, photos, categories(name)),
-        handyman_profile:handyman_id(handyman_profiles(rating_avg, total_jobs_completed, has_insurance, is_verified, specialties))
-      `)
-      .eq('id', bookingId)
-      .single()
-      .then(({ data, error: err }) => {
-        if (err) setError(err.message)
-        else setBooking(data)
-        setLoading(false)
-      })
+    Promise.all([
+      supabase
+        .from('bookings')
+        .select(`
+          *,
+          handyman:handyman_id(id, first_name, last_name, avatar_url),
+          service:service_id(id, title, description, base_price, price_per_hour, estimated_duration, photos, categories(name)),
+          handyman_profile:handyman_id(handyman_profiles(rating_avg, total_jobs_completed, has_insurance, is_verified, specialties))
+        `)
+        .eq('id', bookingId)
+        .single(),
+      supabase
+        .from('job_completions')
+        .select('id, booking_id, handyman_id, completion_photos, completion_description, client_accepted, client_rating, client_review, client_responded_at, created_at')
+        .eq('booking_id', bookingId)
+        .maybeSingle(),
+      supabase
+        .from('reviews')
+        .select('id, rating, title, description, created_at, owner_reply, owner_reply_at, client_reply, client_reply_at')
+        .eq('booking_id', bookingId)
+        .order('created_at', { ascending: false })
+        .maybeSingle(),
+    ]).then(([bookingRes, completionRes, reviewRes]) => {
+      if (bookingRes.error) {
+        setError(bookingRes.error.message)
+      } else {
+        setBooking(bookingRes.data)
+      }
+
+      setCompletion(completionRes.data ?? null)
+      setBookingReview(reviewRes.data ?? null)
+      setRating(reviewRes.data?.rating ?? completionRes.data?.client_rating ?? 5)
+      setReviewText(reviewRes.data?.description ?? completionRes.data?.client_review ?? '')
+      setClientReplyText(reviewRes.data?.client_reply ?? '')
+      setLoading(false)
+    }).catch(err => {
+      setError(err?.message ?? 'Nu am putut încărca rezervarea.')
+      setLoading(false)
+    })
   }, [bookingId])
+
+  const completionPhotos = Array.isArray(completion?.completion_photos) ? completion.completion_photos : []
+  const isCompleted = booking?.status === 'completed'
+  const isApproved = booking?.status === 'client_approved'
+  const isReviewable = !!completion && (isCompleted || isApproved)
+
+  const resolveCurrentUserId = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
+    return user?.id ?? null
+  }
+
+  const persistReview = async (now) => {
+    const reviewerId = await resolveCurrentUserId()
+    if (!reviewerId || !booking?.handyman_id) return
+
+    const payload = {
+      booking_id: bookingId,
+      rating,
+      title: booking.service?.title ?? 'Rezervare finalizată',
+      description: reviewText.trim() || null,
+      review_type: 'for_handyman',
+      reviewer_id: reviewerId,
+      reviewed_id: booking.handyman_id,
+    }
+
+    if (bookingReview?.id) {
+      const { error: reviewErr } = await supabase.from('reviews').update(payload).eq('id', bookingReview.id)
+      if (reviewErr) throw reviewErr
+    } else {
+      const { error: reviewErr } = await supabase.from('reviews').insert({ ...payload, created_at: now })
+      if (reviewErr) throw reviewErr
+    }
+  }
+
+  const submitClientReply = async () => {
+    if (!bookingReview?.id || !clientReplyText.trim()) return
+    setClientReplySaving(true)
+    const now = new Date().toISOString()
+    const { error } = await supabase.from('reviews').update({
+      client_reply: clientReplyText.trim(),
+      client_reply_at: now,
+    }).eq('id', bookingReview.id)
+
+    if (!error) {
+      setBookingReview(prev => prev ? { ...prev, client_reply: clientReplyText.trim(), client_reply_at: now } : prev)
+      setShowClientReplyForm(false)
+    }
+    setClientReplySaving(false)
+  }
+
+  const handleApproveBooking = async () => {
+    if (!completion) {
+      setReviewError('Așteaptă dovezile handymanului înainte de aprobare.')
+      return
+    }
+
+    setReviewSaving(true)
+    setReviewError(null)
+    try {
+      const now = new Date().toISOString()
+
+      const { error: completionErr } = await supabase.from('job_completions').update({
+        client_accepted: true,
+        client_rating: rating,
+        client_review: reviewText.trim() || null,
+        client_responded_at: now,
+        payment_released: true,
+      }).eq('id', completion.id)
+      if (completionErr) throw completionErr
+
+      const { error: bookingErr } = await supabase.from('bookings').update({
+        status: 'client_approved',
+        updated_at: now,
+      }).eq('id', bookingId)
+      if (bookingErr) throw bookingErr
+
+      await persistReview(now)
+
+      if (booking?.handyman_id) {
+        await supabase.from('notifications').insert({
+          user_id: booking.handyman_id,
+          type: 'new_review',
+          title: 'Rezervarea a fost aprobată',
+          body: `Clientul a aprobat lucrarea pentru „${booking.service?.title ?? 'rezervarea'}".`,
+          data: { booking_id: bookingId, redirect: '/handyman/reviews' },
+        })
+      }
+
+      setBooking(prev => prev ? { ...prev, status: 'client_approved' } : prev)
+      setBookingReview(prev => prev ? { ...prev, rating, description: reviewText.trim() || null } : { rating, description: reviewText.trim() || null })
+      onUpdated?.()
+    } catch (e) {
+      setReviewError('Eroare: ' + (e.message ?? ''))
+    } finally {
+      setReviewSaving(false)
+    }
+  }
+
+  const handleRejectBooking = async () => {
+    if (!completion) {
+      setReviewError('Așteaptă dovezile handymanului înainte de respingere.')
+      return
+    }
+
+    setReviewSaving(true)
+    setReviewError(null)
+    try {
+      const now = new Date().toISOString()
+
+      const { error: completionErr } = await supabase.from('job_completions').update({
+        client_accepted: false,
+        client_responded_at: now,
+      }).eq('id', completion.id)
+      if (completionErr) throw completionErr
+
+      const { error: bookingErr } = await supabase.from('bookings').update({
+        status: 'in_progress',
+        updated_at: now,
+      }).eq('id', bookingId)
+      if (bookingErr) throw bookingErr
+
+      setBooking(prev => prev ? { ...prev, status: 'in_progress' } : prev)
+      onUpdated?.()
+    } catch (e) {
+      setReviewError('Eroare: ' + (e.message ?? ''))
+    } finally {
+      setReviewSaving(false)
+    }
+  }
 
   const handleReschedule = async () => {
     if (!reschedDate || !reschedTime) { setReschedError('Selectează data și ora.'); return }
@@ -246,6 +436,42 @@ export default function ClientBookingDetailModal({ bookingId, onClose, onUpdated
 
               {/* Photos din serviciu */}
               <PhotoGallery photos={photos}/>
+
+              {/* Dovezi handyman */}
+              {completion ? (
+                <div className="border border-green-100 rounded-xl p-4 bg-green-50/60 space-y-3">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0 mt-0.5"/>
+                    <div>
+                      <p className="text-sm font-bold text-green-800">Dovezi de finalizare</p>
+                      <p className="text-xs text-green-700">
+                        Trimise de handyman{completion.created_at ? ` pe ${fmtDate(completion.created_at)}` : ''}.
+                      </p>
+                    </div>
+                  </div>
+
+                  {completionPhotos.length > 0 ? <PhotoGallery photos={completionPhotos}/> : (
+                    <div className="h-40 rounded-xl border border-dashed border-green-200 bg-white/70 flex items-center justify-center">
+                      <p className="text-sm text-green-600">Nu există poze atașate.</p>
+                    </div>
+                  )}
+
+                  {completion.completion_description && (
+                    <div className="bg-white/80 rounded-xl p-3 border border-green-100">
+                      <p className="text-xs font-bold text-green-700 uppercase tracking-wide mb-1">Nota handymanului</p>
+                      <p className="text-sm text-gray-700 leading-relaxed italic">"{completion.completion_description}"</p>
+                    </div>
+                  )}
+                </div>
+              ) : isCompleted ? (
+                <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 flex items-start gap-2">
+                  <Loader2 className="w-4 h-4 text-yellow-600 flex-shrink-0 mt-0.5 animate-spin"/>
+                  <div>
+                    <p className="text-sm font-bold text-yellow-800">Așteptăm dovezile de la handyman</p>
+                    <p className="text-xs text-yellow-700 mt-0.5">Lucrarea a fost marcată ca finalizată, dar încă nu au fost încărcate pozele de finalizare.</p>
+                  </div>
+                </div>
+              ) : null}
 
               {/* Handyman card */}
               <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-xl border border-gray-100">
@@ -371,12 +597,6 @@ export default function ClientBookingDetailModal({ bookingId, onClose, onUpdated
                     <span>Preț serviciu</span>
                     <span className="font-semibold text-gray-800">{fmtRON(booking.subtotal)}</span>
                   </div>
-                  {booking.service_fee > 0 && (
-                    <div className="flex justify-between text-gray-500">
-                      <span>Comision platformă (8%)</span>
-                      <span>{fmtRON(booking.service_fee)}</span>
-                    </div>
-                  )}
                   <div className="border-t border-gray-100 pt-2 mt-1 flex justify-between font-black text-base">
                     <span>Total</span>
                     <span className="text-blue-700">{fmtRON(booking.total)}</span>
@@ -452,6 +672,132 @@ export default function ClientBookingDetailModal({ bookingId, onClose, onUpdated
                         </div>
                       )}
                     </>
+                  )}
+                </div>
+              )}
+
+              {isReviewable && (
+                <div className="border border-orange-100 rounded-xl p-4 bg-orange-50/60 space-y-4">
+                  <div>
+                    <p className="text-sm font-bold text-orange-800">Evaluează lucrarea</p>
+                    <p className="text-xs text-orange-700 mt-0.5">Aprobă lucrarea și lasă o recenzie pentru handyman.</p>
+                  </div>
+
+                  {reviewError && (
+                    <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{reviewError}</p>
+                  )}
+
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1.5">Rating *</p>
+                    <StarRating value={rating} onChange={setRating} />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1.5">Recenzie <span className="font-normal text-gray-400">(opțional)</span></label>
+                    <textarea
+                      value={reviewText}
+                      onChange={e => setReviewText(e.target.value)}
+                      rows={3}
+                      placeholder="Descrie experiența cu handymanul..."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none"
+                    />
+                  </div>
+
+                  {isApproved && bookingReview && (
+                    <div className="border-t border-green-200 pt-4 space-y-3">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <StarRating value={bookingReview.rating ?? rating} readOnly />
+                          <span className="text-sm font-bold text-green-700">{bookingReview.rating ?? rating}/5</span>
+                        </div>
+                        <p className="text-sm text-gray-700 italic bg-white/70 rounded-xl p-3 border border-green-100">
+                          {bookingReview.description ? `"${bookingReview.description}"` : 'Ai aprobat lucrarea fără un comentariu scris.'}
+                        </p>
+                        {completion?.client_responded_at && (
+                          <p className="text-xs text-gray-400">
+                            Aprobat pe {new Date(completion.client_responded_at).toLocaleDateString('ro-RO', { day: '2-digit', month: 'long', year: 'numeric' })}
+                          </p>
+                        )}
+                      </div>
+
+                      {bookingReview.owner_reply && (
+                        <div className="bg-blue-50 border-l-4 border-blue-400 rounded-xl p-3 space-y-1">
+                          <p className="text-xs font-bold text-blue-600 uppercase tracking-wide">Răspuns handyman</p>
+                          <p className="text-sm text-gray-700">{bookingReview.owner_reply}</p>
+                          {bookingReview.owner_reply_at && (
+                            <p className="text-xs text-gray-400">
+                              {new Date(bookingReview.owner_reply_at).toLocaleDateString('ro-RO', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {bookingReview.owner_reply && (
+                        bookingReview.client_reply ? (
+                          <div className="bg-gray-50 border-l-4 border-gray-300 rounded-xl p-3 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">Răspunsul tău</p>
+                              <button onClick={() => setShowClientReplyForm(true)}
+                                className="text-xs text-blue-600 hover:underline">Editează</button>
+                            </div>
+                            <p className="text-sm text-gray-700">{bookingReview.client_reply}</p>
+                          </div>
+                        ) : (
+                          !showClientReplyForm && (
+                            <button onClick={() => setShowClientReplyForm(true)}
+                              className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 font-medium transition">
+                              <MessageSquare className="w-4 h-4" /> Răspunde handymanului
+                            </button>
+                          )
+                        )
+                      )}
+
+                      {showClientReplyForm && bookingReview.owner_reply && (
+                        <div className="border border-gray-200 rounded-xl p-3 bg-white space-y-2">
+                          <p className="text-xs font-bold text-gray-600">
+                            {bookingReview.client_reply ? 'Editează răspunsul tău' : 'Răspunde handymanului'}
+                          </p>
+                          <textarea
+                            value={clientReplyText}
+                            onChange={e => setClientReplyText(e.target.value)}
+                            rows={3}
+                            placeholder="Scrie răspunsul tău..."
+                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"
+                          />
+                          <div className="flex gap-2">
+                            <button onClick={() => { setShowClientReplyForm(false); setClientReplyText(bookingReview.client_reply ?? '') }}
+                              className="flex items-center gap-1 px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
+                              <X className="w-3.5 h-3.5" /> Anulează
+                            </button>
+                            <button onClick={submitClientReply} disabled={clientReplySaving || !clientReplyText.trim()}
+                              className="flex items-center gap-1 px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition">
+                              {clientReplySaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                              Trimite
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!isApproved && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleRejectBooking}
+                        disabled={reviewSaving}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2.5 border border-red-300 text-red-600 bg-white rounded-xl text-sm font-medium hover:bg-red-50 transition disabled:opacity-50"
+                      >
+                        <XCircle className="w-4 h-4" /> Respinge
+                      </button>
+                      <button
+                        onClick={handleApproveBooking}
+                        disabled={reviewSaving || !completion}
+                        className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-xl text-sm font-semibold hover:bg-green-700 transition disabled:opacity-50"
+                      >
+                        {reviewSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+                        Aprobă lucrarea
+                      </button>
+                    </div>
                   )}
                 </div>
               )}
