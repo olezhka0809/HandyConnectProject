@@ -7,7 +7,7 @@ import {
   Droplets, Square, Wrench, Paintbrush, Hammer,
   Sparkles, Flower2, Sofa, CircuitBoard, Lightbulb,
   Building2, MoreHorizontal, ChevronLeft, ChevronRight,
-  CheckCircle, Plug, Layers, Wind
+  CheckCircle, Plug, Layers, Wind, CalendarClock
 } from 'lucide-react'
 
 // ─── category icon map (matches your DB icon column) ──────────────────────────
@@ -164,14 +164,24 @@ function PhotoGallery({ photos }) {
  *   onNegotiate – (task) => void  callback când handymanul apasă "Negociază"
  *   onMessage   – (task) => void  callback când apasă "Mesaj" (opțional)
  */
-export default function TaskDetailModal({ taskId, onClose, onNegotiate, onMessage }) {
-  const [task,    setTask]    = useState(null)
-  const [client,  setClient]  = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState(null)
+export default function TaskDetailModal({ taskId, userId, onClose, onNegotiate, onMessage }) {
+  const [task,            setTask]            = useState(null)
+  const [client,          setClient]          = useState(null)
+  const [loading,         setLoading]         = useState(false)
+  const [error,           setError]           = useState(null)
+  const [showReschedule,  setShowReschedule]  = useState(false)
+  const [rescheduleDate,  setRescheduleDate]  = useState('')
+  const [rescheduleTime,  setRescheduleTime]  = useState('')
+  const [rescheduleMsg,   setRescheduleMsg]   = useState('')
+  const [scheduling,      setScheduling]      = useState(false)
+  const [scheduleSuccess, setScheduleSuccess] = useState(false)
 
   useEffect(() => {
-    if (!taskId) { setTask(null); setClient(null); return }
+    if (!taskId) {
+      setTask(null); setClient(null)
+      setShowReschedule(false); setRescheduleDate(''); setRescheduleTime(''); setRescheduleMsg(''); setScheduleSuccess(false)
+      return
+    }
 
     let cancelled = false
     setLoading(true)
@@ -209,6 +219,33 @@ export default function TaskDetailModal({ taskId, onClose, onNegotiate, onMessag
     load()
     return () => { cancelled = true }
   }, [taskId])
+
+  const handleReschedule = async () => {
+    if (!rescheduleDate || !rescheduleTime || !task || !userId) return
+    setScheduling(true)
+    const { error: rErr } = await supabase.from('reschedule_requests').insert({
+      job_id:        task.id,
+      job_type:      'task',
+      handyman_id:   userId,
+      client_id:     task.client_id,
+      proposed_date: rescheduleDate,
+      proposed_time: rescheduleTime,
+      message:       rescheduleMsg || null,
+      status:        'pending_client',
+    })
+    if (!rErr) {
+      await supabase.from('notifications').insert({
+        user_id: task.client_id,
+        type:    'reschedule_request',
+        title:   'Cerere de reprogramare',
+        body:    `Meșterul a propus o nouă dată pentru „${task.title}": ${new Date(rescheduleDate).toLocaleDateString('ro-RO', { day: '2-digit', month: 'long' })} la ${rescheduleTime}.`,
+        data:    { task_id: task.id, redirect: '/dashboard?tab=reschedule' },
+      })
+      setScheduleSuccess(true)
+      setShowReschedule(false)
+    }
+    setScheduling(false)
+  }
 
   if (!taskId) return null
 
@@ -321,6 +358,7 @@ export default function TaskDetailModal({ taskId, onClose, onNegotiate, onMessag
                 <InfoRow icon={DollarSign}  label="Buget client" value={
                   task.budget ? `${Number(task.budget).toLocaleString('ro-RO')} RON` : null
                 } />
+                <InfoRow icon={Clock}       label="Durată estimată" value={task.approximate_duration} />
                 <InfoRow icon={Star}        label="Postat pe"   value={postedAt} />
               </div>
 
@@ -399,11 +437,13 @@ export default function TaskDetailModal({ taskId, onClose, onNegotiate, onMessag
                   <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
                     task.status === 'open'      ? 'bg-green-100 text-green-700' :
                     task.status === 'assigned'  ? 'bg-blue-100 text-blue-700'  :
+                    task.status === 'delayed'   ? 'bg-orange-100 text-orange-700' :
                     task.status === 'completed' ? 'bg-gray-100 text-gray-600'  :
                     'bg-gray-100 text-gray-600'
                   }`}>
                     {task.status === 'open'      ? 'Deschis'   :
                      task.status === 'assigned'  ? 'Atribuit'  :
+                     task.status === 'delayed'   ? 'Întârziat' :
                      task.status === 'completed' ? 'Finalizat' :
                      task.status}
                   </span>
@@ -415,21 +455,87 @@ export default function TaskDetailModal({ taskId, onClose, onNegotiate, onMessag
 
         {/* ── FOOTER ACTIONS ── */}
         {!loading && task && (
-          <div className="flex items-center gap-3 p-5 border-t border-gray-100 flex-shrink-0">
-            {onMessage && (
-              <button
-                onClick={() => { onMessage(task); onClose() }}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition"
-              >
-                <MessageSquare className="w-4 h-4" /> Mesaj
-              </button>
+          <div className="border-t border-gray-100 flex-shrink-0">
+            {/* Reschedule form */}
+            {showReschedule && (
+              <div className="p-5 bg-blue-50 border-b border-blue-100 space-y-3">
+                <p className="text-sm font-semibold text-blue-800">Propune o nouă dată</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Data</label>
+                    <input
+                      type="date"
+                      value={rescheduleDate}
+                      min={new Date(Date.now() + 86400000).toISOString().split('T')[0]}
+                      onChange={e => setRescheduleDate(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Ora</label>
+                    <select
+                      value={rescheduleTime}
+                      onChange={e => setRescheduleTime(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Selectează</option>
+                      {['07:00','08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00','19:00'].map(t => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <textarea
+                  value={rescheduleMsg}
+                  onChange={e => setRescheduleMsg(e.target.value)}
+                  rows={2}
+                  placeholder="Mesaj opțional pentru client..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowReschedule(false)}
+                    className="flex-1 py-2 border border-gray-200 rounded-lg text-sm text-gray-500 hover:bg-gray-50 transition"
+                  >
+                    Anulează
+                  </button>
+                  <button
+                    onClick={handleReschedule}
+                    disabled={!rescheduleDate || !rescheduleTime || scheduling}
+                    className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {scheduling ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    Trimite cererea
+                  </button>
+                </div>
+              </div>
             )}
-            <button
-              onClick={() => { onNegotiate(task); onClose() }}
-              className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white py-2.5 rounded-xl text-sm font-medium hover:bg-blue-700 transition"
-            >
-              <Send className="w-4 h-4" /> Negociază oferta
-            </button>
+
+            {scheduleSuccess && (
+              <div className="mx-5 my-3 flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-xl text-sm text-green-700">
+                <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                Cererea de reprogramare a fost trimisă clientului.
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 p-5">
+              {onMessage && (
+                <button
+                  onClick={() => { onMessage(task); onClose() }}
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition"
+                >
+                  <MessageSquare className="w-4 h-4" /> Mesaj
+                </button>
+              )}
+              {!scheduleSuccess && ['assigned', 'in_progress', 'delayed'].includes(task.status) && (
+                <button
+                  onClick={() => setShowReschedule(v => !v)}
+                  className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white py-2.5 rounded-xl text-sm font-medium hover:bg-blue-700 transition"
+                >
+                  <CalendarClock className="w-4 h-4" /> Reprogramează
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>

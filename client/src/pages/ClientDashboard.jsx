@@ -24,8 +24,11 @@ const STATUS_COLOR = {
   accepted:    'bg-blue-100 text-blue-700',
   confirmed:   'bg-blue-100 text-blue-700',
   in_progress: 'bg-purple-100 text-purple-700',
-  completed:   'bg-green-100 text-green-700',
-  cancelled:   'bg-red-100 text-red-700',
+  delayed:     'bg-orange-100 text-orange-700',
+  completed:        'bg-green-100 text-green-700',
+  client_approved:  'bg-emerald-100 text-emerald-700',
+  client_rejected:  'bg-rose-100 text-rose-700',
+  cancelled:        'bg-red-100 text-red-700',
   open:        'bg-gray-100 text-gray-600',
   assigned:    'bg-blue-100 text-blue-700',
 }
@@ -34,8 +37,11 @@ const STATUS_LABEL = {
   accepted:    'Acceptat',
   confirmed:   'Confirmat',
   in_progress: 'În progres',
-  completed:   'Finalizat',
-  cancelled:   'Anulat',
+  delayed:     'Întârziat',
+  completed:        'Finalizat',
+  client_approved:  'Acceptat de client',
+  client_rejected:  'Respins de client',
+  cancelled:        'Anulat',
   open:        'Deschis',
   assigned:    'Alocat',
 }
@@ -305,13 +311,23 @@ export default function ClientDashboard() {
   const [loading,       setLoading]         = useState(true)
 
   useEffect(() => {
-    if (routerLocation.state?.tab) setTab(routerLocation.state.tab)
+    if (routerLocation.state?.tab)           setTab(routerLocation.state.tab)
+    if (routerLocation.state?.filter)        setTaskStatusFilter(routerLocation.state.filter)
+    if (routerLocation.state?.bookingFilter) setBookingStatusFilter(routerLocation.state.bookingFilter)
   }, [routerLocation.state])
+
   const [detailTaskId,    setDetailTaskId]    = useState(null)
   const [detailBookingId, setDetailBookingId] = useState(null)
 
+  // Booking tab filters
+  const [bookingStatusFilter, setBookingStatusFilter] = useState(routerLocation.state?.bookingFilter || 'all')
+  const [bookingCategoryFilter, setBookingCategoryFilter] = useState('all')
+  const [bookingUrgencyFilter, setBookingUrgencyFilter] = useState('all')
+  const [bookingSortBy, setBookingSortBy] = useState('newest')
+  const [allCategoryNames, setAllCategoryNames] = useState([])
+
   // Task tab filters
-  const [taskStatusFilter, setTaskStatusFilter] = useState('all')
+  const [taskStatusFilter, setTaskStatusFilter] = useState(routerLocation.state?.filter || 'all')
   const [taskCategoryFilter, setTaskCategoryFilter] = useState('all')
   const [taskUrgencyFilter, setTaskUrgencyFilter] = useState('all')
   const [taskOffersFilter, setTaskOffersFilter] = useState('all')
@@ -326,6 +342,23 @@ export default function ClientDashboard() {
   const [negLoading,   setNegLoading]   = useState(false)
   const [acceptedOffer, setAcceptedOffer] = useState(null) // { handymanName, price, taskTitle }
 
+  // Track which offer IDs have been seen (persisted per-user in localStorage)
+  const [seenOfferIds, setSeenOfferIds] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('seen_offer_ids') || '[]') } catch { return [] }
+  })
+
+  // Mark all current offers as seen when the offers tab is viewed
+  useEffect(() => {
+    if (tab === 'offers' && negotiations.length > 0) {
+      const ids = negotiations.map(n => n.id)
+      setSeenOfferIds(prev => {
+        const merged = [...new Set([...prev, ...ids])]
+        localStorage.setItem('seen_offer_ids', JSON.stringify(merged))
+        return merged
+      })
+    }
+  }, [tab, negotiations])
+
   const { location, error: locationError } = useLocation(currentUserId)
 
   // ── load ────────────────────────────────────────────────────────────────────
@@ -336,7 +369,7 @@ export default function ClientDashboard() {
     setCurrentUserId(user.id)
 
     const [
-      profileRes, statsRes, bookingsRes, tasksRes, favsRes, reschedRes, negRes
+      profileRes, statsRes, bookingsRes, tasksRes, favsRes, reschedRes, categoriesRes
     ] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).single(),
       supabase.from('client_dashboard_stats').select('*').eq('client_id', user.id).single(),
@@ -348,6 +381,7 @@ export default function ClientDashboard() {
         .eq('client_id', user.id),
       // Reschedule requests pending for this client (both directions)
       supabase.from('reschedule_requests').select('*').eq('client_id', user.id).in('status', ['pending', 'pending_client', 'pending_handyman']),
+      supabase.from('categories').select('name').eq('is_active', true).order('name'),
     ])
 
     const tksData = tasksRes.data ?? []
@@ -379,6 +413,7 @@ export default function ClientDashboard() {
     setFavorites(favsRes.data ?? [])
     setRescheduleRequests(reschedRes.data ?? [])
     setNegotiations(taskOffersData)
+    setAllCategoryNames((categoriesRes.data ?? []).map(c => c.name).filter(Boolean))
 
     // Activity feed
     const bks = bookingsRes.data ?? []
@@ -470,6 +505,47 @@ export default function ClientDashboard() {
     })
   }
 
+  const handleApproveTask = async (task) => {
+    // Optimistic update — task disappears from 'completed' filter immediately
+    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'client_approved' } : t))
+    await supabase.from('tasks').update({ status: 'client_approved', updated_at: new Date().toISOString() }).eq('id', task.id)
+    await supabase.from('conversations').update({ is_closed: true }).eq('task_id', task.id)
+    if (task.handyman_id) {
+      // Increment completed jobs counter (also handled by DB trigger as primary source)
+      const { data: hp } = await supabase.from('handyman_profiles').select('total_jobs_completed').eq('user_id', task.handyman_id).maybeSingle()
+      if (hp) {
+        await supabase.from('handyman_profiles')
+          .update({ total_jobs_completed: (hp.total_jobs_completed ?? 0) + 1 })
+          .eq('user_id', task.handyman_id)
+      }
+      await supabase.from('notifications').insert({
+        user_id: task.handyman_id,
+        type: 'task_accepted',
+        title: 'Lucrare acceptată!',
+        body: `Clientul a confirmat finalizarea lucrării „${task.title}". Bravo!`,
+        data: { task_id: task.id, redirect: '/handyman/jobs' },
+      })
+    }
+    await loadDashboardData()
+  }
+
+  const handleRejectTask = async (task) => {
+    // Optimistic update — task disappears from 'completed' filter immediately
+    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'client_rejected' } : t))
+    await supabase.from('tasks').update({ status: 'client_rejected', updated_at: new Date().toISOString() }).eq('id', task.id)
+    await supabase.from('conversations').update({ is_closed: true }).eq('task_id', task.id)
+    if (task.handyman_id) {
+      await supabase.from('notifications').insert({
+        user_id: task.handyman_id,
+        type: 'cancellation',
+        title: 'Lucrare contestată',
+        body: `Clientul nu a acceptat finalizarea lucrării „${task.title}". Te rugăm să îl contactezi.`,
+        data: { task_id: task.id, redirect: '/handyman/jobs' },
+      })
+    }
+    await loadDashboardData()
+  }
+
   const handleCounterOffer = async (neg, counterPrice, msg, date, time) => {
     // Mark current handyman offer as negotiating
     await supabase.from('task_offers').update({ status: 'negotiating' }).eq('id', neg.id)
@@ -520,24 +596,71 @@ export default function ClientDashboard() {
   }, {})
 
   const pendingRescheduleCount = rescheduleRequests.length
-  const pendingOffersCount     = Object.keys(negsByJob).length
+  const pendingOffersCount     = negotiations.filter(n => !seenOfferIds.includes(n.id)).length
 
   const totalSpent =
-    bookings.filter(b => b.status === 'completed').reduce((sum, b) => sum + (Number(b.total) || 0), 0) +
-    tasks.filter(t => t.status === 'completed').reduce((sum, t) => sum + (Number(t.final_price) || 0), 0)
+    bookings.filter(b => ['completed','client_approved'].includes(b.status)).reduce((sum, b) => sum + (Number(b.total) || 0), 0) +
+    tasks.filter(t => ['completed','client_approved'].includes(t.status)).reduce((sum, t) => sum + (Number(t.final_price) || 0), 0)
 
   const taskCategoryOptions = [...new Set(tasks.map(t => t.category?.name).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ro'))
+  const bookingCategoryOptions = [...new Set([
+    ...allCategoryNames,
+    ...bookings.map(b => b.service?.categories?.name).filter(Boolean),
+  ])].sort((a, b) => a.localeCompare(b, 'ro'))
+
+  const filteredBookings = bookings
+    .filter(b => {
+      const isAwaiting = ['pending'].includes(b.status)
+      const isActive = ['accepted', 'confirmed', 'assigned', 'in_progress', 'delayed'].includes(b.status)
+
+      if (bookingStatusFilter === 'awaiting'        && !isAwaiting) return false
+      if (bookingStatusFilter === 'active'          && !isActive) return false
+      if (bookingStatusFilter === 'completed'       && b.status !== 'completed') return false
+      if (bookingStatusFilter === 'client_approved' && b.status !== 'client_approved') return false
+      if (bookingStatusFilter === 'client_rejected' && b.status !== 'client_rejected') return false
+      if (bookingStatusFilter === 'cancelled'       && b.status !== 'cancelled') return false
+      if (bookingStatusFilter === 'all' && ['client_approved', 'client_rejected'].includes(b.status)) return false
+
+      if (bookingCategoryFilter !== 'all' && (b.service?.categories?.name ?? '') !== bookingCategoryFilter) return false
+      if (bookingUrgencyFilter !== 'all' && (b.urgency ?? 'normal') !== bookingUrgencyFilter) return false
+
+      return true
+    })
+    .sort((a, b) => {
+      if (bookingSortBy === 'newest') return new Date(b.created_at) - new Date(a.created_at)
+      if (bookingSortBy === 'oldest') return new Date(a.created_at) - new Date(b.created_at)
+      if (bookingSortBy === 'budget_high') return (Number(b.total) || 0) - (Number(a.total) || 0)
+      if (bookingSortBy === 'budget_low') return (Number(a.total) || 0) - (Number(b.total) || 0)
+
+      const rank = {
+        delayed: 0,
+        in_progress: 1,
+        assigned: 2,
+        confirmed: 2,
+        accepted: 2,
+        pending: 3,
+        completed: 4,
+        client_approved: 5,
+        client_rejected: 6,
+        cancelled: 7,
+      }
+      return (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
+    })
 
   const filteredTasks = tasks
     .filter(t => {
       const offersCount = getOffersForTask(t.id).length
       const isAwaiting = t.status === 'open' || t.status === 'pending'
-      const isActive = ['assigned', 'accepted', 'confirmed', 'in_progress'].includes(t.status)
+      const isActive = ['assigned', 'accepted', 'confirmed', 'in_progress', 'delayed'].includes(t.status)
 
       if (taskStatusFilter === 'awaiting' && !isAwaiting) return false
       if (taskStatusFilter === 'active' && !isActive) return false
       if (taskStatusFilter === 'completed' && t.status !== 'completed') return false
+      if (taskStatusFilter === 'client_approved' && t.status !== 'client_approved') return false
+      if (taskStatusFilter === 'client_rejected' && t.status !== 'client_rejected') return false
       if (taskStatusFilter === 'cancelled' && t.status !== 'cancelled') return false
+      // Hide approved/rejected from "all" default view to avoid clutter — they have their own filters
+      if (taskStatusFilter === 'all' && (t.status === 'client_approved' || t.status === 'client_rejected')) return false
 
       if (taskCategoryFilter !== 'all' && (t.category?.name ?? '') !== taskCategoryFilter) return false
       if (taskUrgencyFilter !== 'all' && (t.urgency ?? 'normal') !== taskUrgencyFilter) return false
@@ -553,7 +676,7 @@ export default function ClientDashboard() {
       if (taskSortBy === 'budget_low') return (Number(a.budget) || 0) - (Number(b.budget) || 0)
 
       // status priority
-      const rank = { in_progress: 0, assigned: 1, open: 2, pending: 2, completed: 3, cancelled: 4 }
+      const rank = { delayed: 0, in_progress: 1, assigned: 2, open: 3, pending: 3, completed: 4, cancelled: 5 }
       return (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
     })
 
@@ -766,7 +889,7 @@ export default function ClientDashboard() {
                   {[
                     { label:'Caută Handymani', Icon:Search,       path:'/find-services', color:'text-blue-600 bg-blue-50' },
                     { label:'Postează Task',   Icon:Plus,          path:'/post-task',     color:'text-green-600 bg-green-50' },
-                    { label:'Mesaje',          Icon:MessageSquare, path:'#',              color:'text-purple-600 bg-purple-50' },
+                    { label:'Mesaje',          Icon:MessageSquare, path:'/messages',      color:'text-purple-600 bg-purple-50' },
                     { label:'Scrie Recenzie',  Icon:Star,          path:'#',              color:'text-yellow-600 bg-yellow-50' },
                   ].map(a => (
                     <Link key={a.label} to={a.path} className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50 transition group">
@@ -787,112 +910,209 @@ export default function ClientDashboard() {
             TAB: BOOKINGS
         ══════════════════════════════════════════════════════ */}
         {tab === 'bookings' && (
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
-            <div className="p-5 border-b border-gray-100">
-              <h3 className="font-bold text-gray-800">Toate Rezervările ({bookings.length})</h3>
-            </div>
-            {bookings.length > 0 ? (
-              <div className="divide-y divide-gray-50">
-                {bookings.map(b => {
-                  const resched = getRescheduleForJob(b.id)
-                  const isActionable = ['confirmed','assigned','in_progress'].includes(b.status)
-                  const handymanName = b.handyman ? `${b.handyman.first_name} ${b.handyman.last_name}` : null
-                  const bookingStatusInfo =
-                    b.status === 'completed'   ? `Lucrarea este finalizată${handymanName ? ` (${handymanName})` : ''}` :
-                    b.status === 'in_progress' ? `Handymanul a început lucrarea${handymanName ? ` (${handymanName})` : ''}` :
-                    b.status === 'assigned' || b.status === 'confirmed' ? `Rezervare alocată${handymanName ? ` către ${handymanName}` : ''}` :
-                    b.status === 'accepted'    ? `Rezervare acceptată${handymanName ? ` de ${handymanName}` : ''}` :
-                    b.status === 'cancelled'   ? 'Rezervare anulată' :
-                    'Rezervare în așteptarea confirmării'
-                  const statusInfoColor =
-                    b.status === 'completed'   ? 'text-green-600' :
-                    b.status === 'in_progress' ? 'text-purple-600' :
-                    b.status === 'assigned' || b.status === 'confirmed' ? 'text-blue-600' :
-                    b.status === 'accepted'    ? 'text-green-600' :
-                    b.status === 'cancelled'   ? 'text-red-500' : 'text-yellow-600'
-                  return (
-                    <div key={b.id} className={`p-5 hover:bg-gray-50 transition cursor-pointer ${resched ? 'border-l-4 border-orange-400' : ''}`}
-                      onClick={() => setDetailBookingId(b.id)}>
-                      {/* Row 1: title + price + status */}
-                      <div className="flex items-center justify-between mb-2">
-                        <div>
-                          <p className="font-medium text-gray-800">{b.service?.title || 'Rezervare'}</p>
-                          <p className="text-sm text-gray-500">{b.service?.categories?.name || 'Serviciu'}</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {b.total && !['pending'].includes(b.status) && (
-                            <span className="text-sm font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
-                              {fmtPrice(b.total)}
-                            </span>
-                          )}
-                          <StatusBadge status={b.status}/>
-                        </div>
-                      </div>
+          <div className="space-y-4">
+            <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
+              <div className="p-5 border-b border-gray-100">
+                <h3 className="font-bold text-gray-800">Rezervările Tale ({filteredBookings.length}/{bookings.length})</h3>
+              </div>
 
-                      {/* Row 2: date + status info */}
-                      <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
-                        <div className="flex items-center gap-1"><Clock className="w-3 h-3"/><span>{fmtDate(b.created_at)}</span></div>
-                        <span className={`${statusInfoColor} font-medium`}>{bookingStatusInfo}</span>
-                      </div>
+              {/* Booking filters */}
+              <div className="p-4 border-b border-gray-100 bg-gray-50/60 space-y-3">
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { id: 'all',             label: 'Toate' },
+                    { id: 'awaiting',        label: 'În așteptare' },
+                    { id: 'active',          label: 'Active' },
+                    { id: 'completed',       label: 'Finalizate' },
+                    { id: 'client_approved', label: 'Acceptate' },
+                    { id: 'client_rejected', label: 'Respinse' },
+                    { id: 'cancelled',       label: 'Anulate' },
+                  ].map(f => (
+                    <button
+                      key={f.id}
+                      onClick={() => setBookingStatusFilter(f.id)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
+                        bookingStatusFilter === f.id
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
 
-                      {/* Row 3: badges */}
-                      <div className="flex flex-wrap gap-2 mb-2">
-                        {b.scheduled_date && !['pending','cancelled'].includes(b.status) && (
-                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-green-50 border border-green-200 text-green-700 text-xs font-semibold">
-                            <Calendar className="w-3.5 h-3.5"/>
-                            Programat: {fmtDate(b.scheduled_date)}{b.scheduled_time ? ` la ${b.scheduled_time}` : ''}
+                <div className="grid md:grid-cols-3 gap-2">
+                  <select
+                    value={bookingCategoryFilter}
+                    onChange={e => setBookingCategoryFilter(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="all">Toate categoriile</option>
+                    {bookingCategoryOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+
+                  <select
+                    value={bookingUrgencyFilter}
+                    onChange={e => setBookingUrgencyFilter(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="all">Toate urgențele</option>
+                    <option value="high">Urgent</option>
+                    <option value="medium">Mediu</option>
+                    <option value="normal">Normal</option>
+                    <option value="low">Fără grabă</option>
+                  </select>
+
+                  <select
+                    value={bookingSortBy}
+                    onChange={e => setBookingSortBy(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="newest">Cele mai noi</option>
+                    <option value="oldest">Cele mai vechi</option>
+                    <option value="budget_high">Buget descrescător</option>
+                    <option value="budget_low">Buget crescător</option>
+                    <option value="status">După status</option>
+                  </select>
+                </div>
+              </div>
+
+              {filteredBookings.length > 0 ? (
+                <div className="divide-y divide-gray-50">
+                  {filteredBookings.map(b => {
+                    const resched = getRescheduleForJob(b.id)
+                    const isActionable = ['confirmed','assigned','in_progress','delayed'].includes(b.status)
+                    const handymanName = b.handyman ? `${b.handyman.first_name} ${b.handyman.last_name}` : null
+                    const bookingStatusInfo =
+                      b.status === 'client_approved' ? 'Rezervare acceptată de tine' :
+                      b.status === 'client_rejected' ? 'Rezervare respinsă de tine' :
+                      b.status === 'completed'   ? `Lucrarea este finalizată — în așteptarea confirmării tale` :
+                      b.status === 'delayed'     ? `Handymanul a marcat întârziere${handymanName ? ` (${handymanName})` : ''}` :
+                      b.status === 'in_progress' ? `Handymanul a început lucrarea${handymanName ? ` (${handymanName})` : ''}` :
+                      b.status === 'assigned' || b.status === 'confirmed' ? `Rezervare alocată${handymanName ? ` către ${handymanName}` : ''}` :
+                      b.status === 'accepted'    ? `Rezervare acceptată${handymanName ? ` de ${handymanName}` : ''}` :
+                      b.status === 'cancelled'   ? 'Rezervare anulată' :
+                      'Rezervare în așteptarea confirmării'
+                    const statusInfoColor =
+                      b.status === 'client_approved' ? 'text-emerald-600' :
+                      b.status === 'client_rejected' ? 'text-rose-600' :
+                      b.status === 'completed'   ? 'text-green-600' :
+                      b.status === 'delayed'     ? 'text-orange-600' :
+                      b.status === 'in_progress' ? 'text-purple-600' :
+                      b.status === 'assigned' || b.status === 'confirmed' ? 'text-blue-600' :
+                      b.status === 'accepted'    ? 'text-green-600' :
+                      b.status === 'cancelled'   ? 'text-red-500' : 'text-yellow-600'
+                    return (
+                      <div key={b.id} className={`p-5 hover:bg-gray-50 transition cursor-pointer ${resched ? 'border-l-4 border-orange-400' : ''}`}
+                        onClick={() => setDetailBookingId(b.id)}>
+                        {/* Row 1: title + price + status */}
+                        <div className="flex items-center justify-between mb-2">
+                          <div>
+                            <p className="font-medium text-gray-800">{b.service?.title || 'Rezervare'}</p>
+                            <p className="text-sm text-gray-500">{b.service?.categories?.name || 'Serviciu'}</p>
                           </div>
-                        )}
-                        {b.service_address && (
-                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 text-xs font-medium">
-                            <MapPin className="w-3.5 h-3.5"/>
-                            {b.service_address}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Row 4: action buttons */}
-                      {isActionable && (
-                        <div className="flex flex-wrap gap-2 mb-2">
-                          <button onClick={e => { e.stopPropagation(); setDetailBookingId(b.id) }}
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100 transition">
-                            <CalendarClock className="w-3.5 h-3.5"/> Reprogramează
-                          </button>
-                          <button onClick={e => { e.stopPropagation(); setDetailBookingId(b.id) }}
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 transition">
-                            <XCircle className="w-3.5 h-3.5"/> Anulează
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Reschedule request from handyman */}
-                      {resched && (
-                        <div className="mt-1 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <CalendarClock className="w-4 h-4 text-red-600 flex-shrink-0"/>
-                            <div>
-                              <p className="text-xs font-bold text-red-700">Cerere reprogramare de la handyman</p>
-                              <p className="text-xs text-red-600">Propune: <strong>{fmtDateLong(resched.proposed_date)}</strong> · {resched.proposed_time}</p>
-                              {resched.message && <p className="text-xs text-red-500 italic mt-0.5">"{resched.message}"</p>}
-                            </div>
+                            {b.total && !['pending'].includes(b.status) && (
+                              <span className="text-sm font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                                {fmtPrice(b.total)}
+                              </span>
+                            )}
+                            <StatusBadge status={b.status}/>
                           </div>
-                          <button onClick={e => { e.stopPropagation(); setRescheduleModal({ request: resched, jobTitle: b.service?.title||'Rezervare' }) }}
-                            className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700 transition flex-shrink-0">
-                            Răspunde
-                          </button>
                         </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="p-12 text-center">
-                <Calendar className="w-12 h-12 text-gray-300 mx-auto mb-4"/>
-                <h3 className="font-bold text-gray-800 mb-2">Nicio rezervare încă</h3>
-                <Link to="/find-services" className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium text-sm hover:bg-blue-700 transition">Caută Servicii</Link>
-              </div>
-            )}
+
+                        {/* Row 2: date + status info */}
+                        <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
+                          <div className="flex items-center gap-1"><Clock className="w-3 h-3"/><span>{fmtDate(b.created_at)}</span></div>
+                          <span className={`${statusInfoColor} font-medium`}>{bookingStatusInfo}</span>
+                        </div>
+
+                        {/* Row 3: badges */}
+                        <div className="flex flex-wrap gap-2 mb-2">
+                          {b.scheduled_date && !['pending','cancelled'].includes(b.status) && (
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-green-50 border border-green-200 text-green-700 text-xs font-semibold">
+                              <Calendar className="w-3.5 h-3.5"/>
+                              Programat: {fmtDate(b.scheduled_date)}{b.scheduled_time ? ` la ${b.scheduled_time}` : ''}
+                            </div>
+                          )}
+                          {b.service_address && (
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 text-xs font-medium">
+                              <MapPin className="w-3.5 h-3.5"/>
+                              {b.service_address}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Row 4: action buttons */}
+                        {isActionable && (
+                          <div className="flex flex-wrap gap-2 mb-2">
+                            <button onClick={e => { e.stopPropagation(); setDetailBookingId(b.id) }}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100 transition">
+                              <CalendarClock className="w-3.5 h-3.5"/> Reprogramează
+                            </button>
+                            <button onClick={e => { e.stopPropagation(); setDetailBookingId(b.id) }}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 transition">
+                              <XCircle className="w-3.5 h-3.5"/> Anulează
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Verify & confirm button for completed bookings */}
+                        {b.status === 'completed' && (
+                          <div className="mt-3 pt-3 border-t border-gray-100" onClick={e => e.stopPropagation()}>
+                            <button onClick={() => setDetailBookingId(b.id)}
+                              className="w-full flex items-center justify-center gap-1.5 py-2 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700 transition">
+                              <CheckCircle className="w-3.5 h-3.5"/> Verifică și confirmă rezervarea
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Reschedule request from handyman */}
+                        {resched && (
+                          <div className="mt-1 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <CalendarClock className="w-4 h-4 text-red-600 flex-shrink-0"/>
+                              <div>
+                                <p className="text-xs font-bold text-red-700">Cerere reprogramare de la handyman</p>
+                                <p className="text-xs text-red-600">Propune: <strong>{fmtDateLong(resched.proposed_date)}</strong> · {resched.proposed_time}</p>
+                                {resched.message && <p className="text-xs text-red-500 italic mt-0.5">"{resched.message}"</p>}
+                              </div>
+                            </div>
+                            <button onClick={e => { e.stopPropagation(); setRescheduleModal({ request: resched, jobTitle: b.service?.title||'Rezervare' }) }}
+                              className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700 transition flex-shrink-0">
+                              Răspunde
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="p-12 text-center">
+                  <Calendar className="w-12 h-12 text-gray-300 mx-auto mb-4"/>
+                  <h3 className="font-bold text-gray-800 mb-2">
+                    {bookingStatusFilter === 'all' ? 'Nicio rezervare încă' : 'Nicio rezervare pentru filtrul selectat'}
+                  </h3>
+                  {bookingStatusFilter === 'all' && bookingCategoryFilter === 'all' && bookingUrgencyFilter === 'all' ? (
+                    <Link to="/find-services" className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium text-sm hover:bg-blue-700 transition">Caută Servicii</Link>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setBookingStatusFilter('all')
+                        setBookingCategoryFilter('all')
+                        setBookingUrgencyFilter('all')
+                        setBookingSortBy('newest')
+                      }}
+                      className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium text-sm hover:bg-blue-700 transition"
+                    >
+                      Resetează filtrele
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -914,6 +1134,8 @@ export default function ClientDashboard() {
                   { id: 'awaiting', label: 'În așteptare' },
                   { id: 'active', label: 'Active' },
                   { id: 'completed', label: 'Finalizate' },
+                  { id: 'client_approved', label: 'Acceptate' },
+                  { id: 'client_rejected', label: 'Respinse' },
                   { id: 'cancelled', label: 'Anulate' },
                 ].map(f => (
                   <button
@@ -986,10 +1208,16 @@ export default function ClientDashboard() {
                   const cancelledByClient   = t.special_instructions?.includes('[ANULARE CLIENT]')
                   const cancelledByHandyman = t.special_instructions?.includes('[ANULARE HANDYMAN]')
                   const statusInfo =
-                    t.status === 'in_progress'
+                    t.status === 'delayed'
+                      ? `Handymanul a anunțat întârziere${t.handyman ? ` (${t.handyman.first_name} ${t.handyman.last_name})` : ''}`
+                      : t.status === 'in_progress'
                       ? `Handymanul a început lucrarea${t.handyman ? ` (${t.handyman.first_name} ${t.handyman.last_name})` : ''}`
+                      : t.status === 'client_approved'
+                      ? 'Lucrare acceptată de tine'
+                      : t.status === 'client_rejected'
+                      ? 'Lucrare contestată de tine'
                       : t.status === 'completed'
-                        ? 'Lucrarea este finalizată'
+                        ? 'Lucrarea este finalizată — în așteptarea confirmării tale'
                         : t.status === 'assigned'
                           ? `Task alocat${t.handyman ? ` către ${t.handyman.first_name} ${t.handyman.last_name}` : ''}`
                           : t.status === 'cancelled'
@@ -1019,15 +1247,21 @@ export default function ClientDashboard() {
                       {t.description && <p className="text-sm text-gray-600 mb-2 line-clamp-2">{t.description}</p>}
                       <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
                         <div className="flex items-center gap-1"><Clock className="w-3 h-3"/><span>{fmtDate(t.created_at)}</span></div>
-                        <span className={`${t.status === 'completed' ? 'text-green-600' : t.status === 'in_progress' ? 'text-purple-600' : t.status === 'assigned' ? 'text-blue-600' : 'text-yellow-600'} font-medium`}>
+                        <span className={`${t.status === 'completed' ? 'text-green-600' : t.status === 'delayed' ? 'text-orange-600' : t.status === 'in_progress' ? 'text-purple-600' : t.status === 'assigned' ? 'text-blue-600' : 'text-yellow-600'} font-medium`}>
                           {statusInfo}
                         </span>
                       </div>
                       <div className="flex flex-wrap gap-2 mb-2">
-                        {t.status === 'assigned' && t.scheduled_date && (
+                        {['assigned','delayed'].includes(t.status) && t.scheduled_date && (
                           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-green-50 border border-green-200 text-green-700 text-xs font-semibold">
                             <Calendar className="w-3.5 h-3.5"/>
                             Programat: {fmtDate(t.scheduled_date)}{t.scheduled_time ? ` la ${t.scheduled_time}` : ''}
+                          </div>
+                        )}
+                        {t.approximate_duration && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-xs font-semibold">
+                            <Clock className="w-3.5 h-3.5"/>
+                            Durată estimată: {t.approximate_duration}
                           </div>
                         )}
                         {t.service_address && (
@@ -1038,7 +1272,7 @@ export default function ClientDashboard() {
                         )}
                       </div>
 
-                      {isAssignedTask && (
+                      {(isAssignedTask || t.status === 'delayed') && (
                         <div className="flex flex-wrap gap-2 mb-2">
                           <button
                             onClick={e => {
@@ -1059,6 +1293,18 @@ export default function ClientDashboard() {
                           >
                             <XCircle className="w-3.5 h-3.5" />
                             Anulează
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Open modal for completed tasks — actions are inside the modal */}
+                      {t.status === 'completed' && (
+                        <div className="mt-3 pt-3 border-t border-gray-100" onClick={e => e.stopPropagation()}>
+                          <button
+                            onClick={() => setDetailTaskId(t.id)}
+                            className="w-full flex items-center justify-center gap-1.5 py-2 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700 transition"
+                          >
+                            <CheckCircle className="w-3.5 h-3.5" /> Verifică și confirmă lucrarea
                           </button>
                         </div>
                       )}
@@ -1114,6 +1360,11 @@ export default function ClientDashboard() {
               <span className="px-2.5 py-0.5 bg-orange-100 text-orange-700 text-xs font-bold rounded-full">
                 {negotiations.length} oferte active
               </span>
+              {pendingOffersCount > 0 && (
+                <span className="px-2.5 py-0.5 bg-orange-500 text-white text-xs font-bold rounded-full animate-pulse">
+                  {pendingOffersCount} noi
+                </span>
+              )}
             </div>
 
             {Object.keys(negsByJob).length === 0 ? (
@@ -1128,11 +1379,16 @@ export default function ClientDashboard() {
                 const booking = bookings.find(b => b.id === jobId)
                 const jobTitle = task?.title ?? booking?.service?.title ?? `Job #${jobId.slice(0,6)}`
                 const originalPrice = task?.budget ?? booking?.total
+                const hasUnseen = offers.some(n => !seenOfferIds.includes(n.id))
 
                 return (
-                  <div key={jobId} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                  <div key={jobId} className={`bg-white rounded-2xl shadow-sm overflow-hidden transition-all
+                    ${hasUnseen
+                      ? 'border-2 border-orange-400 ring-1 ring-orange-200'
+                      : 'border border-gray-100'}`}>
                     {/* Job header */}
-                    <div className="px-6 py-4 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+                    <div className={`px-6 py-4 border-b flex items-center justify-between
+                      ${hasUnseen ? 'bg-orange-50 border-orange-100' : 'bg-gray-50 border-gray-100'}`}>
                       <div>
                         <p className="font-bold text-gray-800">{jobTitle}</p>
                         <div className="flex items-center gap-2 mt-0.5">
@@ -1144,9 +1400,17 @@ export default function ClientDashboard() {
                           )}
                         </div>
                       </div>
-                      <span className="px-2.5 py-1 bg-orange-100 text-orange-700 text-xs font-bold rounded-full">
-                        {offers.length} {offers.length === 1 ? 'ofertă' : 'oferte'}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {hasUnseen && (
+                          <span className="px-2 py-0.5 bg-orange-500 text-white text-[10px] font-black rounded-full uppercase tracking-wide">
+                            Nou
+                          </span>
+                        )}
+                        <span className={`px-2.5 py-1 text-xs font-bold rounded-full
+                          ${hasUnseen ? 'bg-orange-200 text-orange-800' : 'bg-orange-100 text-orange-700'}`}>
+                          {offers.length} {offers.length === 1 ? 'ofertă' : 'oferte'}
+                        </span>
+                      </div>
                     </div>
 
                     {/* Offers list */}
@@ -1157,6 +1421,7 @@ export default function ClientDashboard() {
                           neg={neg}
                           originalPrice={originalPrice}
                           loading={negLoading}
+                          isUnseen={!seenOfferIds.includes(neg.id)}
                           onAccept={() => handleAcceptOffer(neg)}
                           onReject={() => handleRejectOffer(neg)}
                           onCounter={(price, msg, date, time) => handleCounterOffer(neg, price, msg, date, time)}
@@ -1295,7 +1560,14 @@ export default function ClientDashboard() {
       )}
 
       {/* Modals */}
-      <ClientTaskDetailModal taskId={detailTaskId} onClose={() => setDetailTaskId(null)} onUpdated={loadDashboardData}/>
+      <ClientTaskDetailModal
+        taskId={detailTaskId}
+        onClose={() => setDetailTaskId(null)}
+        onUpdated={() => {
+          // Reload data; optimistic removal handled by status update in modal
+          loadDashboardData()
+        }}
+      />
       <ClientBookingDetailModal bookingId={detailBookingId} onClose={() => setDetailBookingId(null)} onUpdated={loadDashboardData}/>
       {rescheduleModal && (
         <ClientRescheduleModal
@@ -1311,7 +1583,7 @@ export default function ClientDashboard() {
 
 // ─── OFFER ROW ────────────────────────────────────────────────────────────────
 
-function OfferRow({ neg, originalPrice, loading, onAccept, onReject, onCounter }) {
+function OfferRow({ neg, originalPrice, loading, isUnseen, onAccept, onReject, onCounter }) {
   const [showCounter,  setShowCounter]  = useState(false)
   const [counterPrice, setCounterPrice] = useState('')
   const [counterMsg,   setCounterMsg]   = useState('')
@@ -1354,7 +1626,7 @@ function OfferRow({ neg, originalPrice, loading, onAccept, onReject, onCounter }
     : null
 
   return (
-    <div className="p-5">
+    <div className={`p-5 transition-colors ${isUnseen ? 'bg-orange-50/40' : ''}`}>
       {/* Handyman info + price */}
       <div className="flex items-start gap-3 mb-4">
         {/* Avatar */}
