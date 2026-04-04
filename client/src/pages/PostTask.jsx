@@ -199,6 +199,27 @@ export default function PostTask() {
         }
       }
 
+      // Trimite notificări handymanilor propuși
+      const allProposed = [
+        ...(form.notifyFavorites ? favorites.map(f => f.handyman_id ?? f.id ?? f) : []),
+        ...form.proposedHandymen,
+      ]
+      const uniqueProposed = [...new Set(allProposed.filter(Boolean))]
+      if (uniqueProposed.length > 0) {
+        const clientName = profile
+          ? `${profile.first_name ?? ''} ${profile.last_name ?? ''}`.trim() || 'Un client'
+          : 'Un client'
+        await supabase.from('notifications').insert(
+          uniqueProposed.map(handymanId => ({
+            user_id: handymanId,
+            type: 'task_proposed',
+            title: 'Task propus ție',
+            body: `${clientName} ți-a propus task-ul „${taskData.title}". Intră și acceptă/negociază!`,
+            data: { task_id: taskData.id, redirect: '/handyman/jobs?tab=proposed' },
+          }))
+        )
+      }
+
       setLoading(false)
       setShowSuccess(true)
 

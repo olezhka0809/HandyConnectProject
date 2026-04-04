@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
 import HandymanNavbar from '../components/handyman-dashboard/HandymanNavbar'
 import {
-  Star, Search, Share2, ThumbsUp, Award,
+  Star, Search, Share2, ThumbsUp, ThumbsDown, Award,
   CheckCircle, Loader2, Send, X, Heart,
   MessageSquare
 } from 'lucide-react'
@@ -41,7 +41,8 @@ export default function HandymanReviews() {
   const [myAvatar,     setMyAvatar]     = useState(null)
   const [reviews,      setReviews]      = useState([])
   const [loading,      setLoading]      = useState(true)
-  const [helpfulSet,   setHelpfulSet]   = useState(new Set())
+  const [helpfulSet,      setHelpfulSet]      = useState(new Set())
+  const [notHelpfulSet,   setNotHelpfulSet]   = useState(new Set())
 
   // reply state
   const [replyingTo,   setReplyingTo]   = useState(null) // review id
@@ -66,7 +67,7 @@ export default function HandymanReviews() {
         supabase.from('reviews')
           .select(`
             id, rating, title, description, created_at,
-            helpful_count, owner_reply, owner_reply_at, tags, photos,
+            helpful_count, not_helpful_count, owner_reply, owner_reply_at, tags, photos,
             reviewer:reviewer_id(id, first_name, last_name, avatar_url),
             task:task_id(title, categories(name))
           `)
@@ -83,14 +84,15 @@ export default function HandymanReviews() {
       const loaded = reviewsRes.data ?? []
       setReviews(loaded)
 
-      // care din ele le-a marcat ca utile userul curent
+      // care din ele le-a votat userul curent
       if (loaded.length && user) {
-        const { data: hData } = await supabase
-          .from('review_helpful')
-          .select('review_id')
-          .eq('user_id', user.id)
-          .in('review_id', loaded.map(r => r.id))
+        const ids = loaded.map(r => r.id)
+        const [{ data: hData }, { data: nhData }] = await Promise.all([
+          supabase.from('review_helpful').select('review_id').eq('user_id', user.id).in('review_id', ids),
+          supabase.from('review_not_helpful').select('review_id').eq('user_id', user.id).in('review_id', ids),
+        ])
         setHelpfulSet(new Set((hData ?? []).map(h => h.review_id)))
+        setNotHelpfulSet(new Set((nhData ?? []).map(h => h.review_id)))
       }
 
       setLoading(false)
@@ -109,24 +111,51 @@ export default function HandymanReviews() {
   const maxCount = Math.max(...ratingBreakdown.map(r => r.count), 1)
   const pct5 = totalReviews > 0 ? Math.round((ratingBreakdown[0].count / totalReviews) * 100) : 0
 
-  // ── helpful toggle ─────────────────────────────────────────────────────────
+  // ── helpful / not-helpful toggles ─────────────────────────────────────────
   const toggleHelpful = async (reviewId) => {
     if (!userId) return
-    const isHelpful = helpfulSet.has(reviewId)
-    const delta = isHelpful ? -1 : 1
-
-    // optimistic
-    setHelpfulSet(prev => { const n = new Set(prev); isHelpful ? n.delete(reviewId) : n.add(reviewId); return n })
+    const isOn = helpfulSet.has(reviewId)
+    const delta = isOn ? -1 : 1
+    setHelpfulSet(prev => { const n = new Set(prev); isOn ? n.delete(reviewId) : n.add(reviewId); return n })
+    // remove opposite vote if switching
+    if (!isOn && notHelpfulSet.has(reviewId)) {
+      setNotHelpfulSet(prev => { const n = new Set(prev); n.delete(reviewId); return n })
+      await supabase.from('review_not_helpful').delete().eq('review_id', reviewId).eq('user_id', userId)
+      const nhCurrent = reviews.find(r => r.id === reviewId)?.not_helpful_count ?? 1
+      setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, not_helpful_count: Math.max(0, nhCurrent - 1) } : r))
+      await supabase.from('reviews').update({ not_helpful_count: Math.max(0, nhCurrent - 1) }).eq('id', reviewId)
+    }
     setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, helpful_count: Math.max(0, (r.helpful_count ?? 0) + delta) } : r))
-
-    if (isHelpful) {
+    if (isOn) {
       await supabase.from('review_helpful').delete().eq('review_id', reviewId).eq('user_id', userId)
     } else {
-      await supabase.from('review_helpful').upsert({ review_id: reviewId, user_id: userId, created_at: new Date().toISOString() })
+      await supabase.from('review_helpful').upsert({ review_id: reviewId, user_id: userId })
     }
-    // sync helpful_count in reviews
     const current = reviews.find(r => r.id === reviewId)?.helpful_count ?? 0
     await supabase.from('reviews').update({ helpful_count: Math.max(0, current + delta) }).eq('id', reviewId)
+  }
+
+  const toggleNotHelpful = async (reviewId) => {
+    if (!userId) return
+    const isOn = notHelpfulSet.has(reviewId)
+    const delta = isOn ? -1 : 1
+    setNotHelpfulSet(prev => { const n = new Set(prev); isOn ? n.delete(reviewId) : n.add(reviewId); return n })
+    // remove opposite vote if switching
+    if (!isOn && helpfulSet.has(reviewId)) {
+      setHelpfulSet(prev => { const n = new Set(prev); n.delete(reviewId); return n })
+      await supabase.from('review_helpful').delete().eq('review_id', reviewId).eq('user_id', userId)
+      const hCurrent = reviews.find(r => r.id === reviewId)?.helpful_count ?? 1
+      setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, helpful_count: Math.max(0, hCurrent - 1) } : r))
+      await supabase.from('reviews').update({ helpful_count: Math.max(0, hCurrent - 1) }).eq('id', reviewId)
+    }
+    setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, not_helpful_count: Math.max(0, (r.not_helpful_count ?? 0) + delta) } : r))
+    if (isOn) {
+      await supabase.from('review_not_helpful').delete().eq('review_id', reviewId).eq('user_id', userId)
+    } else {
+      await supabase.from('review_not_helpful').upsert({ review_id: reviewId, user_id: userId })
+    }
+    const current = reviews.find(r => r.id === reviewId)?.not_helpful_count ?? 0
+    await supabase.from('reviews').update({ not_helpful_count: Math.max(0, current + delta) }).eq('id', reviewId)
   }
 
   // ── handyman reply ─────────────────────────────────────────────────────────
@@ -407,15 +436,23 @@ export default function HandymanReviews() {
 
                   {/* Actions */}
                   <div className="flex items-center justify-between pt-3 border-t border-gray-100">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-400">Util?</span>
                       <button onClick={() => toggleHelpful(review.id)}
-                        className={`flex items-center gap-1.5 text-sm transition ${isHelpful ? 'text-blue-600 font-medium' : 'text-gray-400 hover:text-gray-600'}`}>
-                        <Heart className={`w-4 h-4 ${isHelpful ? 'fill-blue-500 text-blue-500' : ''}`} />
-                        Util ({review.helpful_count ?? 0})
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition
+                          ${isHelpful ? 'bg-green-100 text-green-600' : 'text-gray-400 hover:bg-green-50 hover:text-green-600'}`}>
+                        <ThumbsUp className={`w-3.5 h-3.5 ${isHelpful ? 'fill-green-500' : ''}`} />
+                        {review.helpful_count ?? 0}
+                      </button>
+                      <button onClick={() => toggleNotHelpful(review.id)}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition
+                          ${notHelpfulSet.has(review.id) ? 'bg-red-100 text-red-500' : 'text-gray-400 hover:bg-red-50 hover:text-red-500'}`}>
+                        <ThumbsDown className={`w-3.5 h-3.5 ${notHelpfulSet.has(review.id) ? 'fill-red-500' : ''}`} />
+                        {review.not_helpful_count ?? 0}
                       </button>
                       <button onClick={() => handleShare(review)}
-                        className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-600 transition">
-                        <Share2 className="w-4 h-4" /> Distribuie
+                        className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition ml-1">
+                        <Share2 className="w-3.5 h-3.5" /> Distribuie
                       </button>
                     </div>
                     {!isReplying && !review.owner_reply && (

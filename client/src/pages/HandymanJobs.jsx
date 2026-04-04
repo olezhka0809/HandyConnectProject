@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useSearchParams, useLocation } from 'react-router-dom'
+import { useSearchParams, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
 import HandymanNavbar from '../components/handyman-dashboard/HandymanNavbar'
 import JobRequestModal from '../components/handyman-dashboard/JobRequestModal'
 import CompletedJobModal from '../components/handyman-dashboard/CompletedJobModal'
+import TaskRequestModal from '../components/handyman-dashboard/TaskRequestModal'
 import {
   Search, Calendar, MapPin, Camera, CheckCircle,
   XCircle, MessageSquare, Play, RefreshCw, Loader2,
@@ -32,7 +33,7 @@ function fmtPrice(val) {
 }
 
 function normaliseBooking(b) {
-  const statusMap = { pending: 'new', accepted: 'accepted', in_progress: 'in_progress', completed: 'completed', cancelled: 'cancelled' }
+  const statusMap = { pending: 'new', accepted: 'accepted', in_progress: 'in_progress', delayed: 'delayed', completed: 'completed', cancelled: 'cancelled' }
   return {
     _type: 'booking', _id: b.id, _raw: b,
     title: b.handyman_services?.title ?? `Rezervare #${b.id.slice(0, 6)}`,
@@ -44,6 +45,7 @@ function normaliseBooking(b) {
     address: b.service_address ?? '',
     price: fmtPrice(b.total ?? b.subtotal),
     urgency: b.urgency ?? 'normal',
+    approximateDuration: b.handyman_services?.estimated_duration ?? null,
     uiStatus: statusMap[b.status] ?? 'new',
     created_at: b.created_at,
     category: null,
@@ -53,7 +55,7 @@ function normaliseTask(t) {
   const clientName = t.profiles
     ? `${t.profiles.first_name ?? ''} ${t.profiles.last_name ?? ''}`.trim() || t.contact_name || 'Client'
     : t.contact_name || 'Client'
-  const statusMap = { open: 'new', assigned: 'accepted', in_progress: 'in_progress', completed: 'completed' }
+  const statusMap = { open: 'new', assigned: 'accepted', in_progress: 'in_progress', delayed: 'delayed', completed: 'completed' }
   return {
     _type: 'task', _id: t.id, _raw: t,
     title: t.title ?? '—',
@@ -62,8 +64,9 @@ function normaliseTask(t) {
     date: fmtDate(t.scheduled_date, t.scheduled_time),
     photos: Array.isArray(t.photos) ? t.photos : [],
     address: [t.service_address, t.address_city].filter(Boolean).join(', '),
-    price: fmtPrice(t.budget),
+    price: fmtPrice(t.final_price ?? t.budget),
     urgency: t.urgency ?? 'normal',
+    approximateDuration: t.approximate_duration ?? null,
     uiStatus: statusMap[t.status] ?? 'new',
     created_at: t.created_at,
     category: t.categories ?? null,
@@ -92,6 +95,7 @@ function StatusBadge({ status }) {
     new:         { label: 'Nou',        cls: 'bg-blue-100 text-blue-700' },
     accepted:    { label: 'Acceptat',   cls: 'bg-yellow-100 text-yellow-700' },
     in_progress: { label: 'În Progres', cls: 'bg-purple-100 text-purple-700' },
+    delayed:     { label: 'Întârziat',  cls: 'bg-orange-100 text-orange-700' },
     completed:   { label: 'Finalizat',  cls: 'bg-green-100 text-green-700' },
   }
   const { label, cls } = map[status] ?? map.new
@@ -102,9 +106,11 @@ function StatusBadge({ status }) {
 
 const STATUS_TABS = [
   { id: 'all',          label: 'Toate' },
+  { id: 'proposed',     label: 'Propuse' },
   { id: 'new',          label: 'Noi' },
   { id: 'accepted',     label: 'Acceptate' },
   { id: 'in_progress',  label: 'În Progres' },
+  { id: 'delayed',      label: 'Întârziate' },
   { id: 'completed',    label: 'Finalizate' },
   { id: 'negotiations', label: 'Negocieri' },
   { id: 'reschedule',   label: 'Reprogramate' },
@@ -118,12 +124,14 @@ const DAY_MS          = 86_400_000
 export default function HandymanJobs() {
   const [userId,        setUserId]        = useState(null)
   const [jobs,          setJobs]          = useState([])
+  const [proposedJobs,  setProposedJobs]  = useState([])   // tasks proposed directly to this handyman
   const [negotiations,  setNegotiations]  = useState([])   // task_offers by this handyman
   const [reschedules,   setReschedules]   = useState([])   // reschedule_requests by this handyman
   const [loading,       setLoading]       = useState(true)
   const [refreshing,    setRefreshing]    = useState(false)
   const [searchParams] = useSearchParams()
   const location = useLocation()
+  const navigate = useNavigate()
   const [activeTab,     setActiveTab]     = useState(location.state?.tab || 'all')
   const [searchQuery,   setSearchQuery]   = useState('')
   const [urgencyFilter, setUrgencyFilter] = useState('Toate')
@@ -131,6 +139,9 @@ export default function HandymanJobs() {
   const [completedJob,          setCompletedJob]          = useState(null)
   const [startingId,            setStartingId]            = useState(null)
   const [pendingRescheduleId,   setPendingRescheduleId]   = useState(null)
+  const [negotiateTask,         setNegotiateTask]         = useState(null)
+  const [offerForm,             setOfferForm]             = useState({ proposed_price: '', estimated_duration: '', message: '', available_date: '', available_time: '' })
+  const [sendingOffer,          setSendingOffer]          = useState(false)
 
   useEffect(() => {
     if (location.state?.tab) setActiveTab(location.state.tab)
@@ -158,11 +169,11 @@ export default function HandymanJobs() {
           .select('*, profiles!tasks_client_id_fkey(first_name,last_name,avatar_url), categories(id,name,icon)')
           .eq('handyman_id', userId),
 
-        // Tasks proposed to this handyman (open)
+        // Tasks proposed to this handyman (not yet assigned)
         supabase.from('tasks')
           .select('*, profiles!tasks_client_id_fkey(first_name,last_name,avatar_url), categories(id,name,icon)')
           .contains('proposed_to', [userId])
-          .in('status', ['open']),
+          .in('status', ['open', 'pending']),
 
         // task_offers: ALL offers sent by this handyman (all statuses for full history)
         supabase.from('task_offers')
@@ -192,21 +203,28 @@ export default function HandymanJobs() {
       if (reschedRes.error) console.error('[HandymanJobs] reschedule_requests:', reschedRes.error)
 
       const bookings = (bRes.data ?? []).map(normaliseBooking)
-      const taskMap = new Map()
-      ;[...(aRes.data ?? []), ...(pRes.data ?? [])].forEach(t => {
-        if (!taskMap.has(t.id)) taskMap.set(t.id, t)
+      // Proposed tasks (open, not yet assigned) — kept separate
+      const proposedIds = new Set((pRes.data ?? []).map(t => t.id))
+      const assignedTasks = (aRes.data ?? []).filter(t => !proposedIds.has(t.id)).map(normaliseTask)
+
+      // Deduplicate negotiations first so we know which task IDs are already being negotiated
+      const negMapTemp = new Map()
+      ;(negRes.data ?? []).forEach(row => {
+        if (!negMapTemp.has(row.task_id)) negMapTemp.set(row.task_id, row)
       })
-      const tasks = [...taskMap.values()].map(normaliseTask)
-      const all = [...bookings, ...tasks].sort(
+      const negotiatedTaskIds = new Set(negMapTemp.keys())
+
+      // Exclude proposed tasks that already have an active offer from this handyman
+      const proposed = (pRes.data ?? [])
+        .filter(t => !negotiatedTaskIds.has(t.id))
+        .map(normaliseTask)
+      setProposedJobs(proposed)
+
+      const all = [...bookings, ...assignedTasks].sort(
         (a, b) => new Date(b.created_at) - new Date(a.created_at)
       )
       setJobs(all)
-      // Deduplicate: one entry per task_id — keep the LATEST handyman offer per task
-      const negMap = new Map()
-      ;(negRes.data ?? []).forEach(row => {
-        // Since ordered desc, first seen = most recent per task
-        if (!negMap.has(row.task_id)) negMap.set(row.task_id, row)
-      })
+      const negMap = negMapTemp
       setNegotiations([...negMap.values()])
       setReschedules(reschedRes.data ?? [])
     } finally {
@@ -226,13 +244,43 @@ export default function HandymanJobs() {
     setStartingId(null)
   }
 
+  const handleSendOffer = async () => {
+    if (!offerForm.proposed_price || !negotiateTask) return
+    setSendingOffer(true)
+    const { error } = await supabase.from('task_offers').insert({
+      task_id: negotiateTask._id,
+      handyman_id: userId,
+      proposed_price: parseFloat(offerForm.proposed_price),
+      estimated_duration: offerForm.estimated_duration || null,
+      message: offerForm.message || null,
+      available_date: offerForm.available_date || null,
+      available_time: offerForm.available_time || null,
+    })
+    if (!error) {
+      await supabase.from('notifications').insert({
+        user_id: negotiateTask.clientId,
+        type: 'new_offer',
+        title: 'Ofertă nouă primită',
+        body: `Un meșter a trimis o ofertă de ${offerForm.proposed_price} RON pentru „${negotiateTask.title}"`,
+        data: { task_id: negotiateTask._id, redirect: '/dashboard' },
+      })
+      // Remove from proposed list immediately (offer sent, no longer "proposed")
+      setProposedJobs(prev => prev.filter(j => j._id !== negotiateTask._id))
+      setNegotiateTask(null)
+      setOfferForm({ proposed_price: '', estimated_duration: '', message: '', available_date: '', available_time: '' })
+      setActiveTab('negotiations')
+      fetchJobs(true)
+    }
+    setSendingOffer(false)
+  }
+
   const yesterday = Date.now() - DAY_MS
 
   const filteredJobs = jobs.filter(job => {
     if (activeTab === 'new') {
       if (job.uiStatus !== 'new') return false
       if (new Date(job.created_at).getTime() < yesterday) return false
-    } else if (activeTab === 'negotiations' || activeTab === 'reschedule') {
+    } else if (activeTab === 'negotiations' || activeTab === 'reschedule' || activeTab === 'proposed') {
       return false
     } else if (activeTab !== 'all') {
       if (job.uiStatus !== activeTab) return false
@@ -249,6 +297,7 @@ export default function HandymanJobs() {
   const tabCount = id => {
     if (id === 'negotiations') return negotiations.length
     if (id === 'reschedule')   return reschedules.length
+    if (id === 'proposed')     return proposedJobs.length
     if (id === 'all') return jobs.length
     if (id === 'new') return jobs.filter(j => j.uiStatus === 'new' && new Date(j.created_at).getTime() >= yesterday).length
     return jobs.filter(j => j.uiStatus === id).length
@@ -295,13 +344,14 @@ export default function HandymanJobs() {
         <div className="flex gap-1.5 mb-6 bg-white rounded-xl border border-gray-100 p-1.5">
           {STATUS_TABS.map(tab => {
             const count = tabCount(tab.id)
-            const hasAlert = false
+            const hasAlert = tab.id === 'proposed' && proposedJobs.length > 0
             return (
               <button key={tab.id} onClick={() => setActiveTab(tab.id)}
                 className={`relative flex items-center gap-1.5 flex-1 py-2.5 rounded-lg text-sm font-medium justify-center transition-all
-                  ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
+                  ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-sm' : hasAlert ? 'text-purple-700 hover:bg-purple-50' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
                 {tab.id === 'negotiations' && <TrendingDown className="w-3 h-3 flex-shrink-0" />}
                 {tab.id === 'reschedule'   && <CalendarClock className="w-3 h-3 flex-shrink-0" />}
+                {tab.id === 'proposed'     && <User className="w-3 h-3 flex-shrink-0" />}
                 <span className="truncate">{tab.label}</span>
                 <span className={`px-1.5 py-0.5 rounded text-xs font-bold flex-shrink-0
                   ${activeTab === tab.id
@@ -324,6 +374,31 @@ export default function HandymanJobs() {
             <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
             <p className="text-gray-400 text-sm">Se încarcă job-urile...</p>
           </div>
+
+        ) : activeTab === 'proposed' ? (
+          /* ══ PROPUSE ══ */
+          proposedJobs.length === 0 ? (
+            <div className="text-center py-16">
+              <User className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+              <h3 className="text-lg font-bold text-gray-800 mb-2">Niciun task propus</h3>
+              <p className="text-gray-500">Taskurile propuse direct ție de clienți vor apărea aici.</p>
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-4">
+              {proposedJobs.map(job => (
+                <ProposedJobCard
+                  key={job._id}
+                  job={job}
+                  userId={userId}
+                  onAccepted={() => { fetchJobs(true); setActiveTab('accepted') }}
+                  onNegotiate={() => {
+                    setNegotiateTask(job)
+                    setOfferForm({ proposed_price: job._raw?.budget ?? '', estimated_duration: '', message: '', available_date: '', available_time: '' })
+                  }}
+                />
+              ))}
+            </div>
+          )
 
         ) : activeTab === 'negotiations' ? (
           /* ══ NEGOTIATIONS ══ */
@@ -358,7 +433,8 @@ export default function HandymanJobs() {
               <JobCard key={`${job._type}-${job._id}`} job={job} startingId={startingId}
                 onOpen={handleCardClick}
                 onOpenModal={(j, mode) => setSelectedJob({ job: j, mode })}
-                onStartJob={handleStartJob} />
+                onStartJob={handleStartJob}
+                onMessage={(j) => navigate(`/handyman/messages?${j._type}_id=${j._id}`)} />
             ))}
           </div>
         )}
@@ -389,13 +465,23 @@ export default function HandymanJobs() {
           onClose={() => setCompletedJob(null)}
         />
       )}
+      <TaskRequestModal
+        isOpen={!!negotiateTask}
+        task={negotiateTask?._raw}
+        mode="negotiate"
+        form={offerForm}
+        setForm={setOfferForm}
+        onSubmit={handleSendOffer}
+        onClose={() => setNegotiateTask(null)}
+        sending={sendingOffer}
+      />
     </div>
   )
 }
 
 // ─── JOB CARD ─────────────────────────────────────────────────────────────────
 
-function JobCard({ job, startingId, onOpen, onOpenModal, onStartJob }) {
+function JobCard({ job, startingId, onOpen, onOpenModal, onStartJob, onMessage }) {
   const isStarting = startingId === job._id
   return (
     <div className="bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-all cursor-pointer"
@@ -411,6 +497,7 @@ function JobCard({ job, startingId, onOpen, onOpenModal, onStartJob }) {
         {job.description && <p className="text-sm text-gray-600 mb-3 line-clamp-2">{job.description}</p>}
         <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400 mb-3">
           <div className="flex items-center gap-1"><Calendar className="w-3 h-3" /><span>{job.date}</span></div>
+          {job.approximateDuration && <div className="flex items-center gap-1"><Clock className="w-3 h-3" /><span>{job.approximateDuration}</span></div>}
           {job.photos.length > 0 && <div className="flex items-center gap-1"><Camera className="w-3 h-3" /><span>{job.photos.length} {job.photos.length === 1 ? 'Poză' : 'Poze'}</span></div>}
           {job.address && <div className="flex items-center gap-1"><MapPin className="w-3 h-3" /><span className="truncate max-w-[180px]">{job.address}</span></div>}
         </div>
@@ -456,8 +543,18 @@ function JobCard({ job, startingId, onOpen, onOpenModal, onStartJob }) {
               className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 transition">
               <CheckCircle className="w-3.5 h-3.5" /> Marchează Finalizat
             </button>
-            <button className="flex items-center justify-center gap-1 px-3 py-2 border border-gray-200 text-gray-400 text-xs font-medium rounded-lg hover:bg-gray-50 transition">
+            <button onClick={() => onMessage?.(job)} className="flex items-center justify-center gap-1 px-3 py-2 border border-blue-200 text-blue-600 text-xs font-medium rounded-lg hover:bg-blue-50 transition">
               <MessageSquare className="w-3.5 h-3.5" />
+            </button>
+          </>}
+          {job.uiStatus === 'delayed' && <>
+            <button onClick={() => onOpenModal(job, 'details')}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-orange-600 text-white text-xs font-medium rounded-lg hover:bg-orange-700 transition">
+              <AlertTriangle className="w-3.5 h-3.5" /> Gestionează Întârzierea
+            </button>
+            <button onClick={() => onOpenModal(job, 'complete')}
+              className="flex items-center justify-center gap-1 px-3 py-2 border border-green-200 text-green-700 text-xs font-medium rounded-lg hover:bg-green-50 transition">
+              <CheckCircle className="w-3.5 h-3.5" />
             </button>
           </>}
           {job.uiStatus === 'completed' && (
@@ -465,6 +562,106 @@ function JobCard({ job, startingId, onOpen, onOpenModal, onStartJob }) {
               <CheckCircle className="w-3.5 h-3.5 text-green-500" /> Vezi Detalii Finalizare
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── PROPOSED JOB CARD ───────────────────────────────────────────────────────
+
+function ProposedJobCard({ job, userId, onAccepted, onNegotiate }) {
+  const [accepting, setAccepting] = useState(false)
+
+  const handleAccept = async (e) => {
+    e.stopPropagation()
+    setAccepting(true)
+    try {
+      const { data: updated, error: updateError } = await supabase.from('tasks').update({
+        status: 'assigned',
+        handyman_id: userId,
+        updated_at: new Date().toISOString(),
+      }).eq('id', job._id).select('id')
+
+      if (updateError || !updated?.length) {
+        console.error('[ProposedJobCard] task update failed:', updateError ?? 'RLS blocked (0 rows updated)')
+        alert(`Acceptarea a eșuat: ${updateError?.message ?? 'permisiuni insuficiente (RLS)'}`)
+        return
+      }
+
+      await supabase.from('notifications').insert({
+        user_id: job.clientId,
+        type: 'task_accepted',
+        title: 'Task acceptat!',
+        body: `Un meșter a acceptat task-ul „${job.title}" la prețul tău propus.`,
+        data: { task_id: job._id, redirect: '/dashboard' },
+      })
+
+      // Creare conversație — doar dacă nu există deja
+      const { data: existingConv } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('client_id', job.clientId)
+        .eq('handyman_id', userId)
+        .eq('task_id', job._id)
+        .maybeSingle()
+      if (!existingConv) {
+        await supabase.from('conversations').insert({
+          client_id: job.clientId,
+          handyman_id: userId,
+          task_id: job._id,
+        })
+      }
+
+      onAccepted?.()
+    } finally {
+      setAccepting(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border-2 border-purple-200 shadow-sm p-5">
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex-1 min-w-0 pr-3">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">📩 Propus de client</span>
+          </div>
+          <h3 className="font-bold text-gray-800 leading-snug">{job.title}</h3>
+          <p className="text-sm text-gray-500 mt-0.5">{job.client}</p>
+        </div>
+        <UrgencyBadge urgency={job.urgency} />
+      </div>
+
+      {job.description && <p className="text-sm text-gray-600 mb-3 line-clamp-2">{job.description}</p>}
+
+      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400 mb-3">
+        <div className="flex items-center gap-1"><Calendar className="w-3 h-3" /><span>{job.date}</span></div>
+        {job.photos.length > 0 && <div className="flex items-center gap-1"><Camera className="w-3 h-3" /><span>{job.photos.length} poze</span></div>}
+        {job.address && <div className="flex items-center gap-1"><MapPin className="w-3 h-3" /><span className="truncate max-w-[180px]">{job.address}</span></div>}
+      </div>
+
+      <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+        <div>
+          <p className="text-xs text-gray-400">Buget client</p>
+          <p className="font-bold text-lg text-gray-800">{job.price}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleAccept}
+            disabled={accepting}
+            className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition disabled:opacity-60"
+          >
+            {accepting
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <CheckCircle className="w-3.5 h-3.5" />}
+            Acceptă ({job.price})
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onNegotiate?.() }}
+            className="flex items-center gap-1.5 px-4 py-2 border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium rounded-lg hover:bg-blue-100 transition"
+          >
+            <MessageSquare className="w-3.5 h-3.5" /> Negociază
+          </button>
         </div>
       </div>
     </div>
@@ -569,11 +766,14 @@ function NegotiationCard({ neg, onRefresh }) {
   const handleAcceptCounter = async () => {
     if (!counterOffer) return
     setAccepting(true)
-    // Accept client's counter price
-    await supabase.from('task_offers').update({ status: 'accepted' }).eq('id', counterOffer.id)
-    // Close all other offers on this task
+    // Accept both the client's counter and the handyman's own offer (so the card shows "Acceptat")
+    await supabase.from('task_offers').update({ status: 'accepted' })
+      .eq('task_id', neg.task_id).in('id', [counterOffer.id, neg.id])
+    // Reject any remaining unrelated offers on this task
     await supabase.from('task_offers').update({ status: 'rejected' })
-      .eq('task_id', neg.task_id).neq('id', counterOffer.id)
+      .eq('task_id', neg.task_id)
+      .neq('id', counterOffer.id)
+      .neq('id', neg.id)
     // Assign task at the agreed price
     await supabase.from('tasks').update({
       handyman_id: neg.handyman_id,
@@ -581,6 +781,29 @@ function NegotiationCard({ neg, onRefresh }) {
       final_price: counterOffer.proposed_price,
       updated_at:  new Date().toISOString(),
     }).eq('id', neg.task_id)
+
+    // Create conversation if not already present
+    const clientId = task?.client_id
+    if (clientId && neg.handyman_id) {
+      const { data: existingConv } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('client_id', clientId)
+        .eq('handyman_id', neg.handyman_id)
+        .eq('task_id', neg.task_id)
+        .maybeSingle()
+      if (!existingConv) {
+        const { error: convErr } = await supabase.from('conversations').insert({
+          client_id:   clientId,
+          handyman_id: neg.handyman_id,
+          task_id:     neg.task_id,
+        })
+        if (convErr) console.error('[handleAcceptCounter] conversation insert failed:', convErr)
+      }
+    } else {
+      console.warn('[handleAcceptCounter] missing clientId or handyman_id', { clientId, handyman_id: neg.handyman_id, task })
+    }
+
     onRefresh()
   }
 
@@ -924,7 +1147,7 @@ function RescheduleCard({ r, jobs, onRefresh, mode = 'outgoing', onOpenModal }) 
           type: 'new_offer',
           title: 'Contra-propunere de reprogramare',
           body: `Meșteșugarul propune o dată alternativă: ${counterDate} la ${counterTime}.`,
-          data: { job_id: r.job_id, job_type: r.job_type, redirect: '/dashboard' },
+          data: { job_id: r.job_id, job_type: r.job_type, redirect: '/dashboard?tab=reschedule' },
         })
       }
 

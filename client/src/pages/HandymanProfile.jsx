@@ -5,7 +5,8 @@ import DashboardNavbar from '../components/dashboard/DashboardNavbar'
 import {
   ChevronLeft, MapPin, Clock, Star, CheckCircle, Heart, Share2,
   Calendar, MessageSquare, Shield, Award, Briefcase,
-  Wrench, Globe, Loader2, Target, AlertCircle, Copy, X
+  Wrench, Globe, Loader2, Target, AlertCircle, Copy, X,
+  ThumbsUp, ThumbsDown
 } from 'lucide-react'
 
 function StarRow({ rating, size = 'sm' }) {
@@ -29,7 +30,8 @@ export default function HandymanProfile() {
   const [favoriteId,  setFavoriteId]  = useState(null) // id row din favorite_handymen
   const [shareModal,  setShareModal]  = useState(false)
   const [copied,      setCopied]      = useState(false)
-  const [helpfulVoted, setHelpfulVoted] = useState(new Set()) // set of review ids voted in this session
+  const [helpfulSet,      setHelpfulSet]      = useState(new Set())
+  const [notHelpfulSet,   setNotHelpfulSet]   = useState(new Set())
   const [loading,     setLoading]     = useState(true)
   const [notFound,    setNotFound]    = useState(false)
 
@@ -90,11 +92,22 @@ export default function HandymanProfile() {
       // 4. reviews direct prin reviewed_id
       const { data: revData } = await supabase
         .from('reviews')
-        .select('id, rating, title, description, created_at, owner_reply, owner_reply_at, reviewer:reviewer_id(first_name, last_name, avatar_url)')
+        .select('id, rating, title, description, created_at, helpful_count, not_helpful_count, owner_reply, owner_reply_at, reviewer:reviewer_id(first_name, last_name, avatar_url)')
         .eq('reviewed_id', matched.id)
         .order('created_at', { ascending: false })
         .limit(50)
       setReviews(revData ?? [])
+
+      // 5b. load user's existing votes
+      if (user?.id && revData?.length) {
+        const ids = revData.map(r => r.id)
+        const [{ data: hData }, { data: nhData }] = await Promise.all([
+          supabase.from('review_helpful').select('review_id').eq('user_id', user.id).in('review_id', ids),
+          supabase.from('review_not_helpful').select('review_id').eq('user_id', user.id).in('review_id', ids),
+        ])
+        setHelpfulSet(new Set((hData ?? []).map(h => h.review_id)))
+        setNotHelpfulSet(new Set((nhData ?? []).map(h => h.review_id)))
+      }
 
       // 5. favorit status
       if (user?.id) {
@@ -130,13 +143,49 @@ export default function HandymanProfile() {
     setFavLoading(false)
   }
 
-  // ── helpful count ─────────────────────────────────────────────────────────
-  const toggleHelpful = async (rev) => {
-    if (helpfulVoted.has(rev.id)) return // already voted this session
-    const newCount = (rev.helpful_count ?? 0) + 1
-    await supabase.from('reviews').update({ helpful_count: newCount }).eq('id', rev.id)
-    setReviews(prev => prev.map(r => r.id === rev.id ? { ...r, helpful_count: newCount } : r))
-    setHelpfulVoted(prev => new Set([...prev, rev.id]))
+  // ── helpful / not-helpful toggles ────────────────────────────────────────
+  const toggleHelpful = async (reviewId) => {
+    if (!currentUserId) return
+    const isOn = helpfulSet.has(reviewId)
+    const delta = isOn ? -1 : 1
+    setHelpfulSet(prev => { const n = new Set(prev); isOn ? n.delete(reviewId) : n.add(reviewId); return n })
+    // remove opposite vote if present
+    if (!isOn && notHelpfulSet.has(reviewId)) {
+      setNotHelpfulSet(prev => { const n = new Set(prev); n.delete(reviewId); return n })
+      await supabase.from('review_not_helpful').delete().eq('review_id', reviewId).eq('user_id', currentUserId)
+      setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, not_helpful_count: Math.max(0, (r.not_helpful_count ?? 0) - 1) } : r))
+      await supabase.from('reviews').update({ not_helpful_count: Math.max(0, (reviews.find(r => r.id === reviewId)?.not_helpful_count ?? 1) - 1) }).eq('id', reviewId)
+    }
+    setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, helpful_count: Math.max(0, (r.helpful_count ?? 0) + delta) } : r))
+    if (isOn) {
+      await supabase.from('review_helpful').delete().eq('review_id', reviewId).eq('user_id', currentUserId)
+    } else {
+      await supabase.from('review_helpful').upsert({ review_id: reviewId, user_id: currentUserId })
+    }
+    const current = reviews.find(r => r.id === reviewId)?.helpful_count ?? 0
+    await supabase.from('reviews').update({ helpful_count: Math.max(0, current + delta) }).eq('id', reviewId)
+  }
+
+  const toggleNotHelpful = async (reviewId) => {
+    if (!currentUserId) return
+    const isOn = notHelpfulSet.has(reviewId)
+    const delta = isOn ? -1 : 1
+    setNotHelpfulSet(prev => { const n = new Set(prev); isOn ? n.delete(reviewId) : n.add(reviewId); return n })
+    // remove opposite vote if present
+    if (!isOn && helpfulSet.has(reviewId)) {
+      setHelpfulSet(prev => { const n = new Set(prev); n.delete(reviewId); return n })
+      await supabase.from('review_helpful').delete().eq('review_id', reviewId).eq('user_id', currentUserId)
+      setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, helpful_count: Math.max(0, (r.helpful_count ?? 0) - 1) } : r))
+      await supabase.from('reviews').update({ helpful_count: Math.max(0, (reviews.find(r => r.id === reviewId)?.helpful_count ?? 1) - 1) }).eq('id', reviewId)
+    }
+    setReviews(prev => prev.map(r => r.id === reviewId ? { ...r, not_helpful_count: Math.max(0, (r.not_helpful_count ?? 0) + delta) } : r))
+    if (isOn) {
+      await supabase.from('review_not_helpful').delete().eq('review_id', reviewId).eq('user_id', currentUserId)
+    } else {
+      await supabase.from('review_not_helpful').upsert({ review_id: reviewId, user_id: currentUserId })
+    }
+    const current = reviews.find(r => r.id === reviewId)?.not_helpful_count ?? 0
+    await supabase.from('reviews').update({ not_helpful_count: Math.max(0, current + delta) }).eq('id', reviewId)
   }
 
   // ── share ─────────────────────────────────────────────────────────────────
@@ -432,14 +481,23 @@ export default function HandymanProfile() {
                                     <p className="text-xs text-blue-600 leading-relaxed">{rev.owner_reply}</p>
                                   </div>
                                 )}
-                                <div className="flex justify-end mt-2">
-                                  <button onClick={()=>toggleHelpful(rev)}
-                                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition
-                                      ${helpfulVoted.has(rev.id)
-                                        ? 'bg-red-50 text-red-500 cursor-default'
-                                        : 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500'}`}>
-                                    <Heart className={`w-3.5 h-3.5 ${helpfulVoted.has(rev.id)?'fill-red-500 text-red-500':''}`}/>
+                                <div className="flex items-center justify-end gap-2 mt-2">
+                                  <span className="text-xs text-gray-400 mr-1">Util?</span>
+                                  <button onClick={()=>toggleHelpful(rev.id)}
+                                    className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition
+                                      ${helpfulSet.has(rev.id)
+                                        ? 'bg-green-100 text-green-600'
+                                        : 'bg-gray-100 text-gray-500 hover:bg-green-50 hover:text-green-600'}`}>
+                                    <ThumbsUp className={`w-3.5 h-3.5 ${helpfulSet.has(rev.id)?'fill-green-500':''}`}/>
                                     {rev.helpful_count > 0 ? rev.helpful_count : 0}
+                                  </button>
+                                  <button onClick={()=>toggleNotHelpful(rev.id)}
+                                    className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition
+                                      ${notHelpfulSet.has(rev.id)
+                                        ? 'bg-red-100 text-red-500'
+                                        : 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500'}`}>
+                                    <ThumbsDown className={`w-3.5 h-3.5 ${notHelpfulSet.has(rev.id)?'fill-red-500':''}`}/>
+                                    {rev.not_helpful_count > 0 ? rev.not_helpful_count : 0}
                                   </button>
                                 </div>
                               </div>
