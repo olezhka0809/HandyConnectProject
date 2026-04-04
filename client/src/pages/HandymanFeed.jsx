@@ -44,6 +44,7 @@ export default function HandymanFeed() {
     available_time: '',
   })
   const [sendingOffer, setSendingOffer] = useState(false)
+  const [acceptingId, setAcceptingId] = useState(null)
 
   // Work zone popups
   const [showZonePopup, setShowZonePopup] = useState(false)
@@ -383,6 +384,31 @@ export default function HandymanFeed() {
     await loadTasks(updatedProfile, user.id)
   }
 
+  // ─── ACCEPT DIRECT CU PREȚUL CLIENTULUI ─────────────
+  async function handleAcceptDirect(task) {
+    if (!task.budget) return
+    setAcceptingId(task.id)
+    await supabase.from('tasks').update({
+      status: 'assigned',
+      handyman_id: user.id,
+      updated_at: new Date().toISOString(),
+    }).eq('id', task.id)
+
+    const handymanName = `${handymanProfile?.first_name || ''} ${handymanProfile?.last_name || ''}`.trim() || 'Un meșter'
+    await supabase.from('notifications').insert({
+      user_id: task.client_id,
+      type: 'task_accepted',
+      title: 'Task acceptat!',
+      body: `${handymanName} a acceptat task-ul „${task.title}" la prețul tău de ${Number(task.budget).toLocaleString('ro-RO')} RON.`,
+      data: { task_id: task.id, redirect: '/dashboard' },
+    })
+
+    setTasks(prev => prev.map(t =>
+      t.id === task.id ? { ...t, my_offer_status: 'accepted' } : t
+    ))
+    setAcceptingId(null)
+  }
+
   // ─── OFFER HANDLER ───────────────────────────────────
   async function handleSendOffer() {
     if (!offerForm.proposed_price || !selectedTask) return
@@ -659,6 +685,18 @@ export default function HandymanFeed() {
                           <span className="px-4 py-2 bg-red-100 text-red-600 rounded-lg text-sm font-medium">Ofertă refuzată</span>
                         ) : (
                           <>
+                            {task.budget && (
+                              <button
+                                onClick={() => handleAcceptDirect(task)}
+                                disabled={acceptingId === task.id}
+                                className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition disabled:opacity-60"
+                              >
+                                {acceptingId === task.id
+                                  ? <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                  : <CheckCircle className="w-3.5 h-3.5" />}
+                                Acceptă ({Number(task.budget).toLocaleString('ro-RO')} RON)
+                              </button>
+                            )}
                             <button
                               onClick={() => {
                                 setSelectedTask(task)

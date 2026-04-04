@@ -277,6 +277,7 @@ export default function ClientProfile() {
 
   const getStatusColor = (status) => {
     if (status === 'completed') return 'bg-green-100 text-green-700'
+    if (status === 'delayed') return 'bg-orange-100 text-orange-700'
     if (status === 'in_progress') return 'bg-purple-100 text-purple-700'
     if (status === 'pending') return 'bg-yellow-100 text-yellow-700'
     return 'bg-gray-100 text-gray-700'
@@ -284,6 +285,7 @@ export default function ClientProfile() {
 
   const getStatusLabel = (status) => {
     if (status === 'completed') return 'Finalizat'
+    if (status === 'delayed') return 'Întârziat'
     if (status === 'in_progress') return 'În progres'
     if (status === 'pending') return 'În așteptare'
     return status
