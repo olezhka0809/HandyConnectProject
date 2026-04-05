@@ -24,6 +24,9 @@ import HandymanMyProfile from './pages/HandymanMyProfile'
 import Messages from './pages/Messages'
 import HandymanMessages from './pages/HandymanMessages'
 import ProtectedRoute from './components/ProtectedRoute'
+import AdminLogin from './pages/AdminLogin'
+import AdminDashboard from './pages/AdminDashboard'
+import AdminProtectedRoute from './components/AdminProtectedRoute'
 
 function App() {
   return (
@@ -59,7 +62,11 @@ function App() {
         <Route path="/handyman/my-profile" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanMyProfile /></ProtectedRoute>} />
         <Route path="/handyman/messages" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanMessages /></ProtectedRoute>} />
         <Route path="/handyman/personal-profile" element={<ProtectedRoute allowedRoles={['handyman']}><HandymanPersonalProfile /></ProtectedRoute>} />
-        
+
+        {/* Admin routes — URL ascuns, fără link din aplicație */}
+        <Route path="/hc-portal" element={<AdminLogin />} />
+        <Route path="/admin/dashboard" element={<AdminProtectedRoute><AdminDashboard /></AdminProtectedRoute>} />
+
       </Routes>
     </BrowserRouter>
   )
